@@ -188,22 +188,31 @@ python examples/ffmpeg_host.py --input clip.mp4 --playhead 900
 python examples/ffmpeg_host.py --input clip.mp4 --follow --budget 900
 ```
 
-Benchmark on a non-linear editing trace with a tight render and cache budget:
+Benchmark, averaged over 12 randomised editor traces with an equal render
+budget per arm (enforced by assertion, not assumed):
 
-| strategy | avg fps | dropped | hit rate |
-|---|---|---|---|
-| no cache | 2.9 | 1776 | 0.00 |
-| sequential | 5.3 | 926 | 0.48 |
-| **FrameForge** | **15.4** | **448** | **0.75** |
+| arm | what it renders next | what it evicts | avg fps | drop rate | hit rate | wasted renders |
+|---|---|---|---|---|---|---|
+| none | nothing | — | 2.84 | 1.00 | 0.00 | — |
+| sequential | left to right | oldest | 4.83 | 0.60 | 0.40 | 0.51 |
+| adaptive+lru | by priority | oldest | 6.61 | 0.37 | 0.63 | 0.28 |
+| **frameforge** | by priority | cheapest to rebuild | **6.79** | 0.41 | 0.59 | **0.20** |
 
-Sequential caching wins on continuous linear playback — that is the honest
-result. FrameForge wins as soon as the user starts scrubbing, which is what
-editing actually looks like.
+The four arms decompose the result: `sequential → adaptive+lru` isolates the
+**scheduling** contribution (+37% fps, hit rate 0.40 → 0.63), and
+`adaptive+lru → frameforge` isolates the **eviction** contribution — which
+barely moves fps but cuts wasted rendering by ~29%.
+
+Read this honestly. It is **simulated**: frame cost is a formula, so it shows
+the policy behaves as designed, not a real-world speedup. Across 24 seeds
+FrameForge beats sequential by a mean of +2.90 fps but with a standard
+deviation of 2.31, and sequential still wins on 3 of 24 traces. The advantage
+is real on average and unreliable per-session.
 
 ## Testing
 
 ```bash
-python -m pytest -q                 # 70 tests, ~0.5s
+python -m pytest -q                 # 70 tests, ~0.4s
 python -m pytest -q -rs             # also show why anything skipped
 python -m pytest tests/test_engine.py -v
 ```

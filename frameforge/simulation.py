@@ -68,11 +68,38 @@ class FakeEditor:
             for _ in range(dwell):
                 yield target + self._rng.uniform(-4, 4)
 
-    def mixed_session(self) -> Iterator[float]:
-        yield from self.linear_playback(0, step=3)
-        yield from self.scrub(self.timeline.duration * 0.55, span=150, passes=4)
-        yield from self.ping_pong(self.timeline.duration * 0.2, self.timeline.duration * 0.8)
-        yield from self.linear_playback(self.timeline.duration * 0.4, step=3)
+    def mixed_session(self, phases: int = 6) -> Iterator[float]:
+        """A randomised editing session: playback, scrubbing and jumping about.
+
+        Phase order, targets, speeds and durations all derive from the seed, so
+        averaging a benchmark over several seeds samples genuinely different
+        editing behaviour instead of re-running one fixed trace.
+        """
+        rng = self._rng
+        duration = self.timeline.duration
+        for _ in range(phases):
+            kind = rng.choice(("play", "play", "scrub", "jump"))
+            if kind == "play":
+                pos = rng.uniform(0, duration * 0.8)
+                step = rng.choice((1, 2, 3, 4))
+                for _ in range(rng.randint(40, 160)):
+                    if pos >= duration:
+                        break
+                    yield pos
+                    pos += step
+            elif kind == "scrub":
+                yield from self.scrub(
+                    center=rng.uniform(duration * 0.1, duration * 0.9),
+                    span=rng.uniform(60, 240),
+                    passes=rng.randint(2, 5),
+                )
+            else:
+                yield from self.ping_pong(
+                    rng.uniform(0, duration),
+                    rng.uniform(0, duration),
+                    jumps=rng.randint(6, 14),
+                    dwell=rng.randint(4, 10),
+                )
 
     @staticmethod
     def _linspace(a: float, b: float, n: int) -> Iterator[float]:
