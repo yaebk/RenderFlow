@@ -34,39 +34,43 @@ That `render` method is the entire required contract.
 
 ## Why it isn't a plugin for your NLE
 
-The obvious version of this idea is a script you paste into Premiere or Resolve
-that speeds up their cache. We built that, tested it, and it does not work — not
-because of our code, but because the hosts do not expose the necessary control.
+The obvious version of this idea is a script that speeds up your editor's own
+cache. It cannot be built, and not for want of trying.
 
 A cache scheduler needs three things from a host: read the timeline, read the
 playhead, and **cause a specific region to be cached**. The third is the one
 that matters, and nobody offers it.
 
-| Host | Read timeline | Live playhead | Effect / cost info | **Trigger a cache render** |
+| Host | Read timeline | Live playhead | Effect / cost info | **Control the cache** |
 |---|---|---|---|---|
-| DaVinci Resolve | yes | yes | binary only¹ | **no** |
-| Premiere Pro | yes | yes² | yes | **no**² |
+| DaVinci Resolve | yes | yes | yes (colour graph) | **no**¹ |
+| Premiere Pro | yes | yes | yes | **no**² |
 | After Effects | yes | yes | yes | **no** |
 | Final Cut Pro | XML export only | no | no | **no** |
 | Avid Media Composer | AAF export only | no | no | **no** |
 
-¹ Measured empirically: `GetFusionCompCount()` is the only reliable effect
-signal, so a 37-clip timeline priced out as 30 clips at one value and 7 at
-another. One bit of information is not a cost model.
+¹ Verified against Blackmagic's bundled scripting reference: the word "cache"
+appears **once** in the entire document, as `isArchiveRenderCache` — a
+project-archiving flag. No trigger, no mode, no state query.
 ² Premiere's [Sequence API](https://ppro-scripting.docsforadobe.dev/sequence/sequence/)
 exposes `getPlayerPosition`, `setPlayerPosition`, in/out points, work-area
-points and `exportAsMediaDirect` — but no preview-render or cache method at all.
-The undocumented [QE DOM](https://vakago-tools.com/premiere-pro-qe-api/) is
+points and `exportAsMediaDirect` — but no preview-render or cache method. The
+undocumented [QE DOM](https://vakago-tools.com/premiere-pro-qe-api/) is
 described by Adobe as unsupported with no further work planned.
 
 No host exposes cache *state* either, so even a lucky trigger could not be
 measured or de-duplicated. A scheduler that ranks perfectly but cannot act is
 not a render cache; it is a recommendation engine.
 
-**So FrameForge inverts the relationship.** Instead of begging an application to
+**So FrameForge inverts the relationship.** Instead of asking an application to
 cache on our behalf, it schedules *your* renderer — which means it also gets to
-time every render, and learns real costs for free. That sidesteps the effect
+time every render and learn real costs for free. That sidesteps the effect
 detection problem entirely.
+
+Where a host can be scripted to render, that inversion still works *inside* the
+editor — see the [Resolve adapter](frameforge/adapters/resolve/), which builds
+its own cache out of Resolve's render queue rather than trying to drive
+Resolve's.
 
 ---
 
@@ -131,6 +135,51 @@ Everything but `.json` goes through OpenTimelineIO. Interchange formats carry
 effect *names* inconsistently and parameters almost never — so those only seed
 the cold-start estimate, which measured render times then replace.
 
+## Using it in DaVinci Resolve
+
+Resolve has no cache API, so the adapter builds a cache Resolve will use anyway:
+
+1. `SetRenderSettings({MarkIn, MarkOut, ...})` — restrict to one segment
+2. `AddRenderJob()` / `StartRendering(jobId)` — render just that range
+3. `mediaPool.ImportMedia([path])` — bring the result back in
+4. `mediaPool.AppendToTimeline([{...recordFrame, trackIndex}])` — drop it on a
+   dedicated **"FrameForge Cache"** track
+
+A baked clip on the top track plays with no effect processing, so the segment
+becomes free. This is what "render in place" does by hand; FrameForge automates
+it and chooses the **order** — expensive work near your playhead first, instead
+of a front-to-back sweep.
+
+It also gets better cost data here than any interchange format carries, because
+the colour node graph is enumerable: `GetNumNodes()` for grade depth and
+`GetToolsInNode(i)` for the actual tools, normalised into FrameForge's
+vocabulary (`Warp Stabilizer` -> Stabilization, `Lumetri` -> Color Correction).
+
+```python
+from frameforge import CacheEngine
+from frameforge.adapters.resolve import ResolveHost, get_resolve
+
+host = ResolveHost(get_resolve(), cache_dir="D:/ff_cache", dry_run=True)
+engine = CacheEngine(host, host.read_timeline())
+engine.run(max_segments=8)
+```
+
+**On the free edition** there is no "External scripting using" preference, so
+external Python cannot attach. Use
+[scripts/FrameForge_Resolve.py](scripts/FrameForge_Resolve.py): edit `REPO` at
+the top, copy it into Resolve's script folder
+(`%APPDATA%` → `Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Utility/`),
+and run it from **Workspace → Scripts**. It works on both editions.
+
+> **This writes to your timeline.** Baked clips land on their own track; work on
+> a duplicate. Start with `MODE = "plan"` (renders nothing, prints the order),
+> and `MODE = "clear"` removes the track and undoes everything.
+>
+> **Untested against a live Resolve.** Every API call is verified present in
+> Blackmagic's bundled scripting reference, and the adapter has 25 tests against
+> a fake Resolve mirroring those signatures — but no call has executed against
+> the real application. Treat the first run as an experiment.
+
 ## How priority works
 
 For each not-yet-cached segment `c`:
@@ -170,6 +219,8 @@ it times every render and feeds the result back. Use `CostEstimator.save_profile
 | [frameforge/formats/](frameforge/formats/) | Timeline ingest (native JSON, OTIO) |
 | [frameforge/timeline.py](frameforge/timeline.py) | `Clip` / `Timeline` data model |
 | [frameforge/simulation.py](frameforge/simulation.py) | Fake timelines and editor traces |
+| [frameforge/adapters/resolve/](frameforge/adapters/resolve/) | DaVinci Resolve host (render-queue cache) |
+| [scripts/FrameForge_Resolve.py](scripts/FrameForge_Resolve.py) | In-app launcher for Resolve's Scripts menu |
 
 ## Examples
 
@@ -212,7 +263,7 @@ is real on average and unreliable per-session.
 ## Testing
 
 ```bash
-python -m pytest -q                 # 70 tests, ~0.4s
+python -m pytest -q                 # 95 tests, ~0.7s
 python -m pytest -q -rs             # also show why anything skipped
 python -m pytest tests/test_engine.py -v
 ```
@@ -223,6 +274,7 @@ python -m pytest tests/test_engine.py -v
 | [tests/test_flatten.py](tests/test_flatten.py) | Multi-track compositing, sliver merging, cost summing |
 | [tests/test_engine.py](tests/test_engine.py) | Host protocol, `CacheEngine`, budgets, failures, threading |
 | [tests/test_formats.py](tests/test_formats.py) | JSON + OTIO ingest, real EDL parse, effect-name normalising |
+| [tests/test_resolve_adapter.py](tests/test_resolve_adapter.py) | Resolve adapter vs a fake Resolve: render/import/place, eviction, failures |
 
 Tests skip rather than fail when an optional dependency is missing, so a
 core-only install still runs clean.
