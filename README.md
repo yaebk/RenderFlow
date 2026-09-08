@@ -84,11 +84,13 @@ Anything that renders frames along a timeline and caches them:
 
 ```bash
 git clone https://github.com/<you>/RenderFlow && cd RenderFlow
-pip install -r requirements-dev.txt      # optional: tests + timeline ingest
+pip install -e .                 # core only - pure standard library
+pip install -e ".[formats]"      # + read EDL / FCP XML / FCPXML / AAF / Kdenlive
+pip install -e ".[dev]"          # + pytest
 ```
 
-The `frameforge` package itself is **pure standard library**. OpenTimelineIO is
-only needed to read editor export formats.
+The `frameforge` package itself has **no dependencies**. OpenTimelineIO is only
+needed to read editor export formats.
 
 ## The host protocol
 
@@ -198,11 +200,43 @@ Sequential caching wins on continuous linear playback — that is the honest
 result. FrameForge wins as soon as the user starts scrubbing, which is what
 editing actually looks like.
 
-## Tests
+## Testing
 
 ```bash
-python -m pytest -q
+python -m pytest -q                 # 70 tests, ~0.5s
+python -m pytest -q -rs             # also show why anything skipped
+python -m pytest tests/test_engine.py -v
 ```
+
+| File | Covers |
+|---|---|
+| [tests/test_scheduler.py](tests/test_scheduler.py) | Priority ordering, direction, revisit history, eviction |
+| [tests/test_flatten.py](tests/test_flatten.py) | Multi-track compositing, sliver merging, cost summing |
+| [tests/test_engine.py](tests/test_engine.py) | Host protocol, `CacheEngine`, budgets, failures, threading |
+| [tests/test_formats.py](tests/test_formats.py) | JSON + OTIO ingest, real EDL parse, effect-name normalising |
+
+Tests skip rather than fail when an optional dependency is missing, so a
+core-only install still runs clean.
+
+**Testing against your own timeline.** Export an EDL (or FCP XML / AAF) from any
+editor and point a throwaway host at it:
+
+```python
+from frameforge import CacheEngine
+from frameforge.formats import load
+
+class Host:
+    def render(self, seg):
+        print(f"render {seg.name} frames {seg.start}-{seg.end} cost~{seg.cost:.1f}")
+
+engine = CacheEngine(Host(), load("my_edit.edl"))
+engine.set_playhead(300)
+engine.run(until_complete=True)
+print(engine.stats())
+```
+
+That exercises the whole path - ingest, flattening, cost model, scheduling -
+without rendering a single pixel.
 
 ## Status
 

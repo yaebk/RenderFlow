@@ -1,11 +1,6 @@
-# FrameForge core (the frameforge/ package) is pure standard library.
-# Everything below is optional.
-
-# Test suite
+# Superseded by pyproject.toml extras. Prefer:
+#     pip install -e ".[dev]"
+# This file is kept so `pip install -r requirements-dev.txt` still works.
 pytest>=7.0
-
-# Timeline ingest for editor export formats. OpenTimelineIO alone reads .otio;
-# the Plugins bundle adds CMX 3600 EDL, FCP7 XML (also written by Premiere and
-# Resolve), FCP X XML, AAF (Avid) and Kdenlive.
 opentimelineio>=0.17
 OpenTimelineIO-Plugins>=0.17
