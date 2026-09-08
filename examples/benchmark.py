@@ -1,6 +1,6 @@
-"""FLAG 10 / FLAG 11 - benchmark FrameForge against naive caching strategies.
+"""Benchmark the adaptive scheduler against naive caching strategies.
 
-This is a *simulated* playback benchmark (no Resolve, no real pixels):
+A simulated playback benchmark (no real pixels, no host required):
 
 * Each displayed frame is "fast" if its segment is fully cached, else "slow"
   (slower the more expensive the segment's effects are).
@@ -38,7 +38,7 @@ def long_timeline(fps: float = 24.0) -> Timeline:
         ("mblur", ["Motion Blur"]),
         ("denoise", ["Noise Reduction"]),
         ("plain", []),
-        ("fusion", ["Fusion"]),
+        ("composite", ["Composite"]),
         ("optflow", ["Optical Flow"]),
         ("stack", ["Motion Blur", "Noise Reduction"]),
         ("plain", []),
@@ -138,7 +138,7 @@ def main() -> None:
     print(
         "\nWith a tight render + cache budget and a scrubbing/non-linear trace,\n"
         "FrameForge should show fewer dropped frames and a higher hit rate than\n"
-        "sequential caching (handoff Phase 5)."
+        "sequential caching."
     )
 
 

@@ -24,7 +24,7 @@ HARD_TIMELINE = [
     {"name": "mblur_1", "start": 240, "end": 480, "effects": ["Motion Blur"]},
     {"name": "plain", "start": 480, "end": 720, "effects": []},
     {"name": "denoise", "start": 720, "end": 1080, "effects": ["Noise Reduction"]},
-    {"name": "fusion_shot", "start": 1080, "end": 1320, "effects": ["Fusion"]},
+    {"name": "composite", "start": 1080, "end": 1320, "effects": ["Composite"]},
     {"name": "optflow", "start": 1320, "end": 1560, "effects": ["Optical Flow"]},
     {"name": "stack", "start": 1560, "end": 1920, "effects": ["Motion Blur", "Noise Reduction"]},
 ]

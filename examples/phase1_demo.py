@@ -1,6 +1,6 @@
-"""FLAG 1 - scheduler works on simulated timeline data.
+"""The scheduler in its simplest form, on simulated timeline data.
 
-Reproduces the handoff example exactly:
+The canonical example:
 
     clips = [A(0-300, cost 2), B(301-600, cost 9), C(601-900, cost 5)]
     playhead = 450

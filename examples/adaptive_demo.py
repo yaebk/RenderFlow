@@ -1,4 +1,4 @@
-"""FLAG 8 / FLAG 9 - priorities react to playhead motion, direction and history.
+"""Priorities react to playhead motion, playback direction and revisit history.
 
 Runs three scenarios against the "hard" timeline and prints how the cache
 priority order changes.
