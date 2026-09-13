@@ -1,6 +1,0 @@
-# Superseded by pyproject.toml extras. Prefer:
-#     pip install -e ".[dev]"
-# This file is kept so `pip install -r requirements-dev.txt` still works.
-pytest>=7.0
-opentimelineio>=0.17
-OpenTimelineIO-Plugins>=0.17
