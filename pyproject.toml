@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renderflow"
+version = "0.1.0"
+description = "Performance profiler and fixer for DaVinci Resolve"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["renderflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
