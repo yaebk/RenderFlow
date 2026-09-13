@@ -51,6 +51,7 @@ class ClipInfo:
     proxy_path: str
     usage: int
     super_scale: int
+    start_tc: str = ""
     location: str = "local"         # local | onedrive | network | removable | missing
     size_bytes: int | None = None
     on_timeline: bool = False
@@ -81,6 +82,8 @@ class TimelineInfo:
     height: int
     video_tracks: int
     clip_count: int
+    start_frame: int = 0
+    items: list[dict] = field(default_factory=list)   # name, track, start, end, clip (name)
 
 
 @dataclass
@@ -251,6 +254,7 @@ def clip_from_properties(props: dict[str, Any], exists=os.path.exists, drive_typ
         proxy_path=str(props.get("Proxy Media Path") or ""),
         usage=_int(props.get("Usage")),
         super_scale=_int(props.get("Super Scale"), 1),
+        start_tc=str(props.get("Start TC") or ""),
         location=location,
         size_bytes=size,
     )
@@ -281,6 +285,19 @@ def read_clips(project, **kw) -> list[ClipInfo]:
     return clips
 
 
+def frames_to_timecode(frame: int, fps: float) -> str:
+    rate = max(1, int(round(fps)))
+    frames = frame % rate
+    seconds = frame // rate
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}:{frames:02d}"
+
+
+def item_label(name: str, track: int, start: int, fps: float) -> str:
+    """Unique, readable identity for a timeline item: the same clip can be on
+    the timeline many times, so the name alone is not enough."""
+    return f"{name} @V{track} {frames_to_timecode(start, fps)}"
+
+
 def read_timeline(project, clips: list[ClipInfo]) -> TimelineInfo | None:
     """Current timeline summary; also marks which clips are on it and their effects."""
     timeline = project.GetCurrentTimeline()
@@ -289,26 +306,39 @@ def read_timeline(project, clips: list[ClipInfo]) -> TimelineInfo | None:
     by_id = {c.unique_id: c for c in clips if c.unique_id}
     by_path = {c.path: c for c in clips if c.path}
     tracks = _int(timeline.GetTrackCount("video"))
+    fps = _float(timeline.GetSetting("timelineFrameRate"))
     count = 0
+    items: list[dict] = []
     for index in range(1, tracks + 1):
         for item in timeline.GetItemListInTrack("video", index) or []:
             count += 1
             clip = _match_clip(item, by_id, by_path)
+            tools = _fusion_tools(item)
+            nodes = _node_count(item)
+            try:
+                name, start = str(item.GetName()), _int(item.GetStart())
+                items.append({"name": name, "track": index, "start": start,
+                              "end": _int(item.GetEnd()), "clip": clip.name if clip else "",
+                              "label": item_label(name, index, start, fps),
+                              "fusion_tools": tools, "color_nodes": nodes})
+            except Exception:                                       # noqa: BLE001
+                pass
             if clip is None:
                 continue
             clip.on_timeline = True
             clip.fusion_comps = max(clip.fusion_comps, _safe_int(item.GetFusionCompCount))
-            tools = _fusion_tools(item)
             if len(tools) > len(clip.fusion_tools):
-                clip.fusion_tools = tools
-            clip.color_nodes = max(clip.color_nodes, _node_count(item))
+                clip.fusion_tools = tools          # worst use, for the clip table
+            clip.color_nodes = max(clip.color_nodes, nodes)
     return TimelineInfo(
         name=str(timeline.GetName()),
-        fps=_float(timeline.GetSetting("timelineFrameRate")),
+        fps=fps,
         width=_int(timeline.GetSetting("timelineResolutionWidth")),
         height=_int(timeline.GetSetting("timelineResolutionHeight")),
         video_tracks=tracks,
         clip_count=count,
+        start_frame=_safe_int(lambda: timeline.GetStartFrame()),
+        items=items,
     )
 
 
@@ -444,17 +474,20 @@ def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
                                "slowest things Resolve can do in real time. Turn it off while "
                                "editing and re-enable it for the final render."))
 
-        if c.fusion_tools and c.on_timeline:
-            kinds = sorted(set(c.fusion_tools))
-            out.append(Finding("medium", "fusion-comp", c.name,
-                               f"Fusion composition with {len(c.fusion_tools)} tool(s): "
+    # Effects live on timeline items, not source clips: the same clip can be
+    # on the timeline several times with different work on each copy.
+    for item in (timeline.items if timeline else []):
+        tools, nodes = item.get("fusion_tools") or [], item.get("color_nodes") or 0
+        if tools:
+            kinds = sorted(set(tools))
+            out.append(Finding("medium", "fusion-comp", item["label"],
+                               f"Fusion composition with {len(tools)} tool(s): "
                                + ", ".join(kinds[:6]) + (", ..." if len(kinds) > 6 else ""),
                                "Fusion comps are rendered per frame during playback. Render Cache "
                                "(Smart) or render-in-place turns them into plain video."))
-
-        if c.color_nodes > 4 and c.on_timeline:
-            out.append(Finding("info", "deep-grade", c.name,
-                               f"{c.color_nodes}-node colour grade",
+        if nodes > 4:
+            out.append(Finding("info", "deep-grade", item["label"],
+                               f"{nodes}-node colour grade",
                                "Each node is a pass over every frame; noise reduction or blur "
                                "nodes dominate. Enable Render Cache if this clip stutters."))
 
@@ -476,7 +509,8 @@ def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
                            f"project-wide Super Scale is {settings.super_scale}x",
                            "Applies neural upscaling to everything. Disable while editing."))
 
-    heavy_fx = [c for c in clips if c.on_timeline and (c.fusion_tools or c.color_nodes > 4)]
+    heavy_fx = [i for i in (timeline.items if timeline else [])
+                if i.get("fusion_tools") or (i.get("color_nodes") or 0) > 4]
     if settings.render_cache_mode == "none" and heavy_fx:
         out.append(Finding("info", "render-cache-off", "project",
                            f"Render Cache is off and {len(heavy_fx)} timeline clip(s) carry effects",

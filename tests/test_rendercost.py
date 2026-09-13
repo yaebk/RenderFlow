@@ -16,6 +16,7 @@ from renderflow.rendercost import (
     estimate_export,
     render_cost,
     render_findings,
+    sample_sizes,
 )
 
 
@@ -99,6 +100,8 @@ class FakeTimeline:
 class FakeProject:
     """Renders instantly; the cost per frame is looked up from the item covering MarkIn."""
 
+    OVERHEAD_MS = 400            # the fixed per-job cost the live Resolve showed
+
     def __init__(self, timeline, codecs=None, fail_ranges=()):
         self.timeline = timeline
         self.codecs = codecs if codecs is not None else {"mov": {"DNxHR LB": "DNxHRLB", "H.264": "H264"},
@@ -147,7 +150,7 @@ class FakeProject:
                 info["JobStatus"] = "Failed"
             else:
                 info["JobStatus"] = "Complete"
-                info["TimeTakenToRenderInMs"] = int(frames * item.ms_per_frame)
+                info["TimeTakenToRenderInMs"] = int(self.OVERHEAD_MS + frames * item.ms_per_frame)
             self.timeline.timecode = f"frame {info['mark_in']}"        # the real one moves the playhead
             self.page = "deliver"
             with open(os.path.join(self.settings["TargetDir"], info["name"] + ".mov"), "w") as fh:
@@ -220,7 +223,7 @@ def test_render_queue_samples_and_restores_everything(tmp_path):
     with RenderQueue(resolve, target_dir=str(tmp_path)) as queue:
         assert project.format == {"format": "mov", "codec": "DNxHRLB"}
         ms, status = queue.render_range(216500, 216523)
-        assert (ms, status) == (24 * 32.0, "Complete")
+        assert (ms, status) == (400 + 24 * 32.0, "Complete")
         assert project.settings["MarkIn"] == 216500 and project.settings["MarkOut"] == 216523
         assert project.settings["SelectAllFrames"] is False
     # restored
@@ -250,55 +253,94 @@ def test_render_queue_cleans_own_temp_dir():
 
 
 # ---------------------------------------------------------- render_cost
+def test_sample_sizes():
+    assert sample_sizes(6000, 60.0, 10.0, 2.0) == (600, 120)
+    assert sample_sizes(6000, 24.0, 10.0, 2.0) == (240, 48)
+    assert sample_sizes(6000, 24.0, 1.0, 2.0) == (120, 30)        # never below MIN_LONG_FRAMES
+    assert sample_sizes(200, 60.0, 10.0, 2.0) == (200, 50)         # clip shorter than 10 s
+    assert sample_sizes(10, 60.0, 10.0, 2.0) == (10, 0)            # too short for two samples
+    assert sample_sizes(6000, 60.0, 10.0, 0.0) == (600, 0)         # short sample disabled
+
+
 def test_render_cost_samples_middle_of_each_clip_on_every_track(tmp_path):
-    v1 = [FakeItem("plain", 0, 600, 10.0), FakeItem("graded", 600, 1200, 40.0, nodes=6)]
-    v2 = [FakeItem("title", 300, 420, 25.0, comps=[FakeComp("MediaIn", "Text+", "MediaOut")])]
+    v1 = [FakeItem("plain", 0, 6000, 10.0), FakeItem("graded", 6000, 12000, 40.0, nodes=6)]
+    v2 = [FakeItem("title", 3000, 4200, 25.0, comps=[FakeComp("MediaIn", "Text+", "MediaOut")])]
     resolve, project = make([v1, v2])
     log = []
-    rc = render_cost(resolve, frames=24, progress=log.append,
+    rc = render_cost(resolve, progress=log.append,
                      queue=RenderQueue(resolve, target_dir=str(tmp_path)))
     assert [s.item for s in rc.samples] == ["plain", "graded", "title"]
-    assert [s.sample_start for s in rc.samples] == [288, 888, 348]     # (length-24)//2 in
-    assert all(s.frames == 24 and s.ok for s in rc.samples)
+    assert [s.sample_start for s in rc.samples] == [2700, 8700, 3300]  # (length-600)//2 in
+    assert all(s.frames == 600 and s.short_frames == 120 and s.ok for s in rc.samples)
+    # the two-point fit cancels the 400 ms per-job overhead exactly
     assert [round(s.ms_per_frame) for s in rc.samples] == [10, 40, 25]
+    assert all(round(s.overhead_ms) == 400 for s in rc.samples)
+    assert "overhead ~400 ms removed" in rc.text()
+    assert [l for l in log if "short" in l] and [l for l in log if "long" in l]
     assert rc.samples[2].fusion_tools == ["Text+"] and rc.samples[1].color_nodes == 6
     assert rc.fps == 60.0 and rc.codec == "DNxHRLB"
-    assert len(log) == 3 and "1/3" in log[0]
 
 
-def test_render_cost_short_clip_uses_its_whole_length(tmp_path):
+def test_long_sample_is_cut_back_for_a_heavy_clip(tmp_path):
+    # 2 s per frame: a 600-frame sample would take 20 minutes. Budget 60 s -> ~30 frames,
+    # but never below 4x the short sample.
+    resolve, project = make([[FakeItem("fusion", 0, 6000, 2000.0)]])
+    rc = render_cost(resolve, budget_s=60.0, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
+    s = rc.samples[0]
+    assert s.short_frames == 120 and s.frames == 480               # 4 * short wins over budget
+    assert round(s.ms_per_frame) == 2000
+    resolve, project = make([[FakeItem("fusion", 0, 6000, 2000.0)]])
+    rc = render_cost(resolve, budget_s=600.0, short_seconds=0.5,     # ~300 frames affordable
+                     queue=RenderQueue(resolve, target_dir=str(tmp_path)))
+    s = rc.samples[0]
+    assert s.short_frames == 30 and 120 <= s.frames < 600            # budget-limited
+
+
+def test_render_cost_short_clip_uses_its_whole_length_and_one_sample(tmp_path):
     resolve, _ = make([[FakeItem("blip", 0, 5, 2.0)]])
-    rc = render_cost(resolve, frames=24, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
-    assert rc.samples[0].frames == 5 and rc.samples[0].sample_start == 0
+    rc = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
+    s = rc.samples[0]
+    assert s.frames == 5 and s.sample_start == 0
+    assert s.short_frames == 0 and not s.two_point             # too short for two samples
+    assert s.ms_per_frame == (400 + 5 * 2.0) / 5               # overhead stays in, honestly
+
+
+def test_render_cost_can_skip_the_short_sample(tmp_path):
+    resolve, project = make([[FakeItem("a", 0, 6000, 10.0)]])
+    rc = render_cost(resolve, short_seconds=0,
+                     queue=RenderQueue(resolve, target_dir=str(tmp_path)))
+    assert rc.samples[0].short_frames == 0 and len(project.deleted) == 1
 
 
 def test_export_estimate_charges_each_frame_to_the_top_track_once(tmp_path):
-    v1 = [FakeItem("plain", 0, 600, 10.0), FakeItem("graded", 600, 1200, 40.0)]
-    v2 = [FakeItem("title", 300, 420, 25.0)]
+    v1 = [FakeItem("plain", 0, 6000, 10.0), FakeItem("graded", 6000, 12000, 40.0)]
+    v2 = [FakeItem("title", 3000, 4200, 25.0)]
     resolve, _ = make([v1, v2])
     rc = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
-    # plain: 600 frames minus the 120 under the title = 480 * 10; title 120 * 25; graded 600 * 40
-    expected_ms = 480 * 10 + 120 * 25 + 600 * 40
-    assert rc.total_frames == 1200
+    # plain: 6000 frames minus the 1200 under the title = 4800 * 10; title 1200 * 25; graded 6000 * 40
+    expected_ms = 4800 * 10 + 1200 * 25 + 6000 * 40
+    assert rc.total_frames == 12000
     assert rc.estimated_export_s == round(expected_ms / 1000, 1)
-    assert round(rc.shares["graded"], 3) == round(24000 / expected_ms, 3)
+    shares = {s.item: rc.shares[s.label] for s in rc.samples}
+    assert round(shares["graded"], 3) == round(240000 / expected_ms, 3)
+    assert rc.samples[0].label == "plain @V1 00:00:00:00"
     assert abs(sum(rc.shares.values()) - 1.0) < 1e-9
 
 
 def test_failed_sample_is_recorded_not_raised(tmp_path):
-    resolve, _ = make([[FakeItem("bad", 0, 100, 1.0), FakeItem("good", 100, 200, 1.0)]],
-                      fail_ranges={(38, 61)})
+    resolve, _ = make([[FakeItem("bad", 0, 1000, 1.0), FakeItem("good", 1000, 2000, 1.0)]],
+                      fail_ranges={(200, 799)})          # the 600-frame long sample of "bad"
     rc = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
     assert rc.samples[0].status == "Failed" and not rc.samples[0].ok
     assert rc.samples[1].ok
-    assert rc.total_frames == 100                                  # failed clip not estimated
+    assert rc.total_frames == 1000                                 # failed clip not estimated
     codes = [f.code for f in render_findings(rc)]
     assert "render-sample-failed" in codes
 
 
 # -------------------------------------------------------------- findings
 def sample(name, ms, start=0, end=600, track=1, **kw):
-    return RenderSample(name, track, start, end, start, 24, ms * 24, "Complete", **kw)
+    return RenderSample(name, track, start, end, start, 24, ms * 24, "Complete", label=name, **kw)
 
 
 def test_findings_thresholds_and_relative_cost():

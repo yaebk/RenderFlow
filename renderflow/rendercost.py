@@ -1,12 +1,16 @@
 """Measure what each timeline clip costs Resolve to render, using Resolve itself.
 
 FFmpeg can time decoding, but only Resolve can time a grade, a Fusion comp or
-a Super Scale. So this renders a short sample (24 frames by default) from the
-middle of every clip on the timeline through the render queue and reads back
-``TimeTakenToRenderInMs`` from the job status. That gives milliseconds per
-frame for the whole pipeline - decode, colour, Fusion, scaling - plus the
-encode of the sample.
+a Super Scale. So this renders two samples from the middle of every clip on
+the timeline through the render queue - a short one (2 s) and a long one
+(10 s) - and reads back ``TimeTakenToRenderInMs`` from each job. That time
+includes a fixed per-job set-up cost (about 0.7 s on a live Resolve 19) and
+the pipeline is deeply parallel, so small jobs all take the same time and a
+single sample badly overstates the per-frame cost; the slope between the two
+samples is the true milliseconds per frame for the whole pipeline - decode,
+colour, Fusion, scaling - plus the encode of the sample.
 
+    ms_per_frame   = (t_long - t_short) / (frames_long - frames_short)
     realtime_ratio = frames rendered per second / timeline fps
 
 WHAT THE NUMBER MEANS
@@ -35,9 +39,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from renderflow.scan import Finding, _fusion_tools, _int, _node_count
+from renderflow.scan import Finding, _fusion_tools, _int, _node_count, item_label
 
-DEFAULT_FRAMES = 24
+DEFAULT_SECONDS = 10.0          # long sample, in timeline seconds
+DEFAULT_SHORT_SECONDS = 2.0     # short sample; slope between the two cancels job set-up
+DEFAULT_BUDGET_S = 60.0         # cap on wall time per long sample
+MIN_LONG_FRAMES = 120           # below this the pipeline's parallelism hides the slope
 SAMPLE_NAME = "renderflow_sample"
 PREFERRED = [("mov", "DNxHRLB"), ("mov", "DNxHRSQ"), ("mp4", "H264")]
 JOB_TIMEOUT_S = 900.0
@@ -55,14 +62,38 @@ class RenderSample:
     status: str                 # Complete | Failed | Cancelled | Timeout
     fusion_tools: list[str] = field(default_factory=list)
     color_nodes: int = 0
+    short_frames: int = 0       # second, shorter sample used to cancel per-job overhead
+    short_ms: float = 0.0
+    label: str = ""             # unique identity: "<name> @V<track> <timecode>"
+
+    def __post_init__(self) -> None:
+        if not self.label:
+            self.label = f"{self.item} @V{self.track} #{self.start}"
 
     @property
     def ok(self) -> bool:
         return self.status == "Complete" and self.frames > 0 and self.render_ms > 0
 
     @property
+    def two_point(self) -> bool:
+        return self.ok and 0 < self.short_frames < self.frames and self.short_ms > 0
+
+    @property
+    def overhead_ms(self) -> float:
+        """Fixed per-job cost implied by the two samples (0 if only one sample)."""
+        if not self.two_point:
+            return 0.0
+        return max(0.0, self.short_ms - self.short_frames * self.ms_per_frame)
+
+    @property
     def ms_per_frame(self) -> float:
-        return self.render_ms / self.frames if self.ok else 0.0
+        if not self.ok:
+            return 0.0
+        if self.two_point:
+            slope = (self.render_ms - self.short_ms) / (self.frames - self.short_frames)
+            if slope > 0:
+                return slope
+        return self.render_ms / self.frames
 
     @property
     def render_fps(self) -> float:
@@ -91,17 +122,23 @@ class RenderProfile:
         data = asdict(self)
         for sample, raw in zip(self.samples, data["samples"]):
             raw["ms_per_frame"] = round(sample.ms_per_frame, 2)
+            raw["overhead_ms"] = round(sample.overhead_ms, 1)
             raw["render_fps"] = round(sample.render_fps, 2)
             raw["realtime_ratio"] = round(self.ratio(sample), 3)
-            raw["export_share"] = round(self.shares.get(sample.item, 0.0), 4)
+            raw["export_share"] = round(self.shares.get(sample.label, 0.0), 4)
         return data
 
     def text(self) -> str:
-        lines = [f"timeline : {self.timeline} @ {self.fps:g} fps, sample codec {self.format}/{self.codec}",
+        overheads = [s.overhead_ms for s in self.samples if s.two_point]
+        note = (f", per-job overhead ~{sum(overheads) / len(overheads):.0f} ms removed"
+                if overheads else "")
+        lines = [f"timeline : {self.timeline} @ {self.fps:g} fps, sample codec "
+                 f"{self.format}/{self.codec}{note}",
                  f"{'clip':<34} {'trk':>3} {'frames':>7} {'ms/frame':>9} {'render':>8} "
                  f"{'ratio':>6} {'export':>7}  carries"]
         for s in self.samples:
-            name = (s.item[:31] + "...") if len(s.item) > 34 else s.item
+            name = (s.item[:21] + "...") if len(s.item) > 24 else s.item
+            name = f"{name} @V{s.track} {s.label.rsplit(' ', 1)[-1]}"
             carries = []
             if s.fusion_tools:
                 carries.append("fusion " + ",".join(sorted(set(s.fusion_tools))[:3]))
@@ -111,7 +148,7 @@ class RenderProfile:
                 lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {'-':>9} {'-':>8} {'-':>6} "
                              f"{'-':>7}  {s.status}")
                 continue
-            share = self.shares.get(s.item, 0.0)
+            share = self.shares.get(s.label, 0.0)
             lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {s.ms_per_frame:>9.1f} "
                          f"{s.render_fps:>7.1f}  {self.ratio(s):>5.2f}x {share:>6.0%}  "
                          f"{', '.join(carries)}")
@@ -251,9 +288,38 @@ def timeline_items(timeline) -> list[dict[str, Any]]:
     return items
 
 
-def render_cost(resolve, frames: int = DEFAULT_FRAMES, progress: Callable[[str], None] | None = None,
+def _label(item: dict, fps: float) -> str:
+    return item_label(item["name"], item["track"], item["start"], fps)
+
+
+def sample_sizes(length: int, fps: float, seconds: float, short_seconds: float,
+                 min_frames: int = MIN_LONG_FRAMES) -> tuple[int, int]:
+    """(long, short) sample lengths in frames for a clip of ``length`` frames.
+
+    Resolve's render pipeline is deeply parallel: on a live Resolve 19 a
+    12-frame and a 48-frame job took the same time, and the true per-frame
+    slope only appeared past ~100 frames. So the long sample is at least
+    ``min_frames`` and the short one at most a quarter of it.
+    """
+    long = max(min_frames, int(round(seconds * fps)))
+    long = max(1, min(long, length))
+    short = int(round(short_seconds * fps)) if short_seconds > 0 else 0
+    short = min(short, long // 4)
+    if short < 4:
+        short = 0
+    return long, short
+
+
+def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float = DEFAULT_SHORT_SECONDS,
+                budget_s: float = DEFAULT_BUDGET_S, progress: Callable[[str], None] | None = None,
                 queue: RenderQueue | None = None) -> RenderProfile:
-    """Sample every clip on the current timeline and return a :class:`RenderProfile`."""
+    """Sample every clip on the current timeline and return a :class:`RenderProfile`.
+
+    Each clip gets a short sample first, then a long one whose length is cut
+    back if the short one predicts it would take more than ``budget_s`` of
+    wall time (a heavy Fusion clip at seconds per frame). The slope between
+    the two cancels the fixed per-job cost.
+    """
     project = resolve.GetProjectManager().GetCurrentProject()
     if project is None:
         raise RuntimeError("no project is open in Resolve")
@@ -268,18 +334,36 @@ def render_cost(resolve, frames: int = DEFAULT_FRAMES, progress: Callable[[str],
     with queue:
         for index, item in enumerate(items, 1):
             length = item["end"] - item["start"]
-            n = max(1, min(frames, length))
-            sample_start = item["start"] + max(0, (length - n) // 2)
-            if progress:
-                progress(f"rendering sample {index}/{len(items)}: {item['name']} ({n} frames)")
+            n, n_short = sample_sizes(length, fps, seconds, short_seconds)
+            short_ms, ms, status = 0.0, 0.0, "Failed"
             try:
+                if n_short:
+                    short_start = item["start"] + max(0, (length - n_short) // 2)
+                    if progress:
+                        progress(f"sample {index}/{len(items)}: {item['name']} - short ({n_short} frames)")
+                    short_ms, short_status = queue.render_range(short_start, short_start + n_short - 1)
+                    if short_status != "Complete":
+                        n_short, short_ms = 0, 0.0
+                    elif short_ms > 0:
+                        # Worst case the whole short time was per-frame work: keep the long
+                        # sample inside the budget, but always well above the short one.
+                        affordable = int(budget_s * 1000.0 * n_short / short_ms)
+                        n = max(min(n, affordable), 4 * n_short)
+                        n = min(n, length)
+                sample_start = item["start"] + max(0, (length - n) // 2)
+                if progress:
+                    progress(f"sample {index}/{len(items)}: {item['name']} - long ({n} frames)")
                 ms, status = queue.render_range(sample_start, sample_start + n - 1)
             except RuntimeError as exc:
-                ms, status = 0.0, f"Failed: {exc}"
+                ms, status, n_short, short_ms = 0.0, f"Failed: {exc}", 0, 0.0
+                sample_start = item["start"]
+            if n_short >= n:
+                n_short, short_ms = 0, 0.0
             samples.append(RenderSample(
                 item=item["name"], track=item["track"], start=item["start"], end=item["end"],
                 sample_start=sample_start, frames=n, render_ms=ms, status=status,
                 fusion_tools=item["fusion_tools"], color_nodes=item["color_nodes"],
+                short_frames=n_short, short_ms=short_ms, label=_label(item, fps),
             ))
 
     profile = RenderProfile(str(timeline.GetName()), fps, queue.format, queue.codec, samples)
@@ -304,7 +388,7 @@ def estimate_export(profile: RenderProfile) -> None:
         if not s.ok:
             continue
         cost = frames * s.ms_per_frame
-        per_item[s.item] = per_item.get(s.item, 0.0) + cost
+        per_item[s.label] = per_item.get(s.label, 0.0) + cost
         total_ms += cost
         total_frames += frames
     profile.total_frames = total_frames
@@ -345,7 +429,7 @@ def render_findings(profile: RenderProfile) -> list[Finding]:
     cheapest = min((s.ms_per_frame for s in good), default=0.0)
     for s in profile.samples:
         if not s.ok:
-            out.append(Finding("medium", "render-sample-failed", s.item,
+            out.append(Finding("medium", "render-sample-failed", s.label,
                                f"sample render did not complete ({s.status})",
                                "Resolve could not render this range through the queue; check the "
                                "clip plays at all and that the render queue is idle."))
@@ -361,19 +445,19 @@ def render_findings(profile: RenderProfile) -> list[Finding]:
                     if cheapest and len(good) > 1 else "")
         rate = f"{s.ms_per_frame:.0f} ms/frame, {ratio:.2f}x real time{relative}"
         if ratio < 0.5:
-            out.append(Finding("high", "render-heavy", s.item,
+            out.append(Finding("high", "render-heavy", s.label,
                                f"renders far below real time: {rate}",
                                "Measured by Resolve's own render queue on this machine, so this "
                                "includes everything: decode, grade, Fusion and scaling" + what +
                                ". Render Cache or render-in-place for this clip is the fix."))
         elif ratio < 1.0:
-            out.append(Finding("medium", "render-slow", s.item,
+            out.append(Finding("medium", "render-slow", s.label,
                                f"renders below real time: {rate}",
                                "Includes the sample encode, so playback will be somewhat better "
                                "than this - but any added effect tips it over" + what + "."))
-        share = profile.shares.get(s.item, 0.0)
+        share = profile.shares.get(s.label, 0.0)
         if share >= 0.5 and len(good) > 1:
-            out.append(Finding("medium", "export-dominant", s.item,
+            out.append(Finding("medium", "export-dominant", s.label,
                                f"accounts for {share:.0%} of the estimated export time",
                                "Whatever this clip carries is where export time goes. Simplify "
                                "or pre-render it and the whole export speeds up."))

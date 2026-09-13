@@ -8,21 +8,52 @@ Works on the **free edition** of Resolve, which is the one that needs it most:
 on Windows the free edition has no hardware H.264/H.265 decoding, so ordinary
 phone and mirrorless footage stutters and most users never learn why.
 
-## What it will do
+## What it does
 
-1. **Profile** — measure, on your machine, what each clip and timeline region
-   costs: decode speed per source clip, render cost per effect, settings that
-   hurt playback.
-2. **Fix** — apply the known remedies correctly and reversibly: proxies for the
-   clips that need them (not all of them), markers on heavy effects, timeline
-   settings, render-in-place for expensive regions.
-3. **Report** — a plain-language summary for a human, or structured JSON and a
-   tool interface for an agent.
+```
+python -m renderflow report          # measure the open project, rank what is slow, plan fixes
+python -m renderflow fix             # show the plan (nothing changes)
+python -m renderflow fix --apply     # make the changes, journaled
+python -m renderflow fix --undo      # reverse them
+```
 
-## Design rule
+Three instruments, one report:
 
-Everything must be useful with no AI attached. The profiler and fixer are
-deterministic code; an agent is one more front end, not the product.
+1. **Scan** - inventory of every clip (codec, resolution, bit depth, where
+   the file lives, proxies), the timeline (which clips, real Fusion tools,
+   colour nodes), and the performance settings; plus explainable rules of
+   thumb.
+2. **Decode profiler** - FFmpeg decodes a sample of every source clip on this
+   machine: *decoded fps / clip fps*. Below 1 the clip cannot play in real
+   time; above 2 the codec is not the problem. Also times random-access
+   seeks (scrubbing feel).
+3. **Render-cost profiler** - Resolve's own render queue renders a sample of
+   every timeline clip; the slope between a short and a long sample gives
+   true milliseconds per frame for the whole pipeline (decode, grade,
+   Fusion, scaling). Reports each clip's cost against real time, against the
+   cheapest clip, its share of export time, and an estimated export time for
+   the timeline.
+
+Then the **fixer** applies only what the measurements justify, journaled and
+reversible: DNxHR LB proxies (and the *Prefer Proxies* setting Resolve needs
+to use them), Render Cache -> Smart for effect-heavy clips, Super Scale off,
+and timeline markers over the clips with findings.
+
+Measured on a real project (Resolve 19, free edition, Windows): a plain
+1080p60 H.264 capture decodes at 375 fps and renders at 3-4 ms/frame - the
+rule-of-thumb "H.264 is slow" was wrong for that machine and the tool said
+so; a copy of the same clip with five chained Fusion blurs renders at
+25 ms/frame, 0.67x real time, 6x the cheapest clip, 66% of export time - and
+the tool proposed Smart cache and a marker, applied them, and undid them.
+
+## Design rules
+
+Everything is useful with no AI attached. The profiler and fixer are
+deterministic code; an agent is one more front end. The `.claude/skills/
+renderflow` skill teaches Claude Code to run `report --json` and explain it.
+
+Measure, don't guess. Every rule-of-thumb finding is labelled as such and is
+replaced by a measurement when one exists.
 
 ## The bridge (built)
 
@@ -125,7 +156,11 @@ deleted and its files removed; existing queue jobs are untouched.
 
 ## Status
 
-Bridge, scan, decode profiler and render-cost profiler all verified against
-a live free-edition Resolve 19. The fixer (proxies, settings, markers,
-render-in-place) not started. The previous codebase (an adaptive
+Bridge, scan, decode profiler, render-cost profiler, fixer and undo all
+verified against a live free-edition Resolve 19, including a four-clip test
+timeline with real Fusion effects. Not done: render-in-place (deliberately -
+Smart cache covers it without freezing content), an MCP server (the skill
+file plus `--json` covers Claude Code), and before/after playback numbers
+(Resolve exposes no playback timing; decode and render measurements are the
+proxy for it). The previous codebase (an adaptive
 render-cache scheduler) is preserved in git history at `50a4854`.
