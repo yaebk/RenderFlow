@@ -84,8 +84,28 @@ This is the unmeasured half of the profiler - rules of thumb from facts
 Resolve already knows. Measured decode and render timing comes next and can
 override it.
 
+## The profiler (built)
+
+```
+python -m renderflow profile            # scan, then measure every clip
+python -m renderflow profile --json
+```
+
+Needs FFmpeg (`winget install Gyan.FFmpeg` on Windows). For each source clip
+it decodes a five-second sample from the middle of the file with the CPU and
+times it, giving *decoded fps / clip fps* - below 1.0 the clip cannot play in
+real time on this machine, below 2.0 it has no headroom for grades or
+effects. It also times random-access seeks, which is what scrubbing feels
+like. Measurements replace the scan's codec guesses in the findings and are
+cached per file in `~/.renderflow/measurements.json`, so a project is
+measured once.
+
+FFmpeg stands in for Resolve's decoder: it is at least as fast as the free
+edition's, so the ratio is an upper bound on what playback will manage.
+
 ## Status
 
-Bridge and scan both verified against a live free-edition Resolve 19.
-Measured profiling and the fixer not started. The previous codebase (an adaptive
+Bridge, scan and decode profiler all verified against a live free-edition
+Resolve 19. Render-cost profiling (effects, via the render queue) and the
+fixer not started. The previous codebase (an adaptive
 render-cache scheduler) is preserved in git history at `50a4854`.

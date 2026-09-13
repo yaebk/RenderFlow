@@ -58,6 +58,7 @@ class ClipInfo:
     fusion_tools: list[str] = field(default_factory=list)   # real tools, passthrough excluded
     color_nodes: int = 0
     unique_id: str = ""
+    measured: dict | None = None    # filled in by renderflow.profile
 
     @property
     def codec_family(self) -> str:
