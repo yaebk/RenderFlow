@@ -62,8 +62,30 @@ machine can reach it, and each request carries a per-session token from
 
 Tests: `python -m pytest -q` (runs against a fake Resolve; no Resolve needed).
 
+## The scan (built)
+
+With the bridge running:
+
+```
+python -m renderflow scan           # readable report
+python -m renderflow scan --json    # for tools and agents
+```
+
+It inventories every video clip in the media pool (codec, resolution, bit
+depth, length, where the file lives, proxy status), reads the open timeline
+(which clips are used, real Fusion tools, colour node counts) and the
+performance-related project settings, then applies explainable rules:
+software-decoded long-GOP codecs, media on OneDrive/network/removable drives,
+missing media, Super Scale, Fusion work, deep grades, and settings that
+silently defeat proxies (for example "Prefer Camera Originals" with proxies
+present). Every finding carries a plain-language *why*.
+
+This is the unmeasured half of the profiler - rules of thumb from facts
+Resolve already knows. Measured decode and render timing comes next and can
+override it.
+
 ## Status
 
-Bridge done and tested against a fake Resolve; not yet run against a live
-Resolve. Profiler and fixer not started. The previous codebase (an adaptive
+Bridge and scan both verified against a live free-edition Resolve 19.
+Measured profiling and the fixer not started. The previous codebase (an adaptive
 render-cache scheduler) is preserved in git history at `50a4854`.
