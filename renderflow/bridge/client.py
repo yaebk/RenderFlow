@@ -24,6 +24,8 @@ from typing import Any, Callable
 from renderflow.bridge import protocol
 from renderflow.bridge.protocol import ROOT_HANDLE, default_discovery_path
 
+HANDSHAKE_TIMEOUT_S = 10.0
+
 
 class BridgeUnavailable(ConnectionError):
     """No bridge is running (or its discovery file is missing or stale)."""
@@ -108,14 +110,17 @@ class Bridge:
                 f"bridge at {self.host}:{self.port} is not answering ({exc}); "
                 "is it still running inside Resolve?"
             ) from None
-        sock.settimeout(self.timeout)
         self._sock = sock
         self._file = sock.makefile("rb")
+        # A bridge whose thread never runs accepts the connection and then says
+        # nothing; bound the first exchange so that shows up as an error, not a hang.
+        sock.settimeout(HANDSHAKE_TIMEOUT_S)
         try:
             self.ping()
-        except RemoteError:
+        except (RemoteError, BridgeUnavailable):
             self.close()
             raise
+        sock.settimeout(self.timeout)
         return self
 
     def close(self) -> None:
@@ -149,6 +154,12 @@ class Bridge:
         try:
             self._sock.sendall(protocol.dumps(message))
             line = self._file.readline()
+        except socket.timeout:
+            self.close()
+            raise BridgeUnavailable(
+                f"bridge at {self.host}:{self.port} accepted the connection but did not "
+                "answer - it is probably stuck inside Resolve; stop and restart it"
+            ) from None
         except OSError as exc:
             self.close()
             raise BridgeUnavailable(f"bridge connection lost: {exc}") from None

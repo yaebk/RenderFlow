@@ -2,8 +2,18 @@
 
 :class:`BridgeServer` owns the ``resolve`` object, a handle table, and a
 localhost TCP listener. Every request is checked against a per-session token,
-decoded, run against the API under a lock (one API call at a time, whatever
-the client does), and the result encoded back.
+decoded, run against the API, and the result encoded back.
+
+WHY IT IS SINGLE-THREADED
+-------------------------
+The first version answered requests from a background thread. Inside Resolve
+that thread never ran: the script's main thread sat in the UI toolkit's event
+loop, which does not yield to other Python threads, so clients connected and
+then waited forever. So the server has no threads of its own. Everything
+happens in :meth:`poll`, which the caller drives from whatever loop it is
+already running - the in-app launcher alternates UI event pumping with
+``poll()``; tests and other hosts can use :meth:`start` to run that loop in a
+thread of their own.
 
 The request handling is separate from the socket code so it can be tested
 against a fake ``resolve`` with no network at all - see ``handle_request``.
@@ -15,7 +25,8 @@ import hmac
 import json
 import os
 import secrets
-import socketserver
+import select
+import socket
 import threading
 import time
 
@@ -27,6 +38,8 @@ from renderflow.bridge.protocol import (
     Handles,
     default_discovery_path,
 )
+
+SEND_TIMEOUT_S = 10.0
 
 
 def _type_name(obj):
@@ -51,9 +64,11 @@ class BridgeServer(object):
         self.handles = Handles(resolve)
         self.started_at = None
         self.requests_served = 0
-        self._lock = threading.Lock()
-        self._tcp = None
+        self._listener = None
+        self._clients = {}          # socket -> unread bytes
+        self._stop_requested = False
         self._thread = None
+        self._close_lock = threading.Lock()
 
     # ------------------------------------------------------------ requests
     def handle_request(self, request):
@@ -75,7 +90,7 @@ class BridgeServer(object):
                 self.handles.clear()
                 result = True
             elif op == "shutdown":
-                threading.Thread(target=self.stop, daemon=True).start()
+                self._stop_requested = True     # the reply still goes out first
                 result = True
             else:
                 raise BridgeError("unknown op %r" % (op,))
@@ -113,9 +128,8 @@ class BridgeServer(object):
             raise BridgeError("method must be a public identifier, got %r" % (method,))
         target = self.handles.get(handle)
         args = protocol.decode(request.get("args") or [], lambda h, _t: self.handles.get(h))
-        with self._lock:
-            attr = getattr(target, method)
-            result = attr(*args) if callable(attr) else attr
+        attr = getattr(target, method)
+        result = attr(*args) if callable(attr) else attr
         return protocol.encode(result, self._register)
 
     def _register(self, obj):
@@ -124,44 +138,132 @@ class BridgeServer(object):
     # -------------------------------------------------------------- sockets
     @property
     def address(self):
-        if self._tcp is None:
-            return (self.host, self.port)
-        return self._tcp.server_address[:2]
+        return (self.host, self.port)
 
-    def start(self):
-        """Listen in a background thread and write the discovery file."""
-        if self._tcp is not None:
+    @property
+    def running(self):
+        return self._listener is not None
+
+    def listen(self):
+        """Open the port and write the discovery file. Then drive :meth:`poll`."""
+        if self._listener is not None:
             return self.address
-        self._tcp = _Listener((self.host, self.port), self)
-        self.host, self.port = self._tcp.server_address[:2]
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((self.host, self.port))
+        listener.listen(8)
+        listener.setblocking(False)
+        self.host, self.port = listener.getsockname()[:2]
+        self._listener = listener
+        self._stop_requested = False
         self.started_at = time.time()
         self._write_discovery()
-        self._thread = threading.Thread(
-            target=self._tcp.serve_forever, args=(0.05,), name="renderflow-bridge", daemon=True
-        )
-        self._thread.start()
         return self.address
 
-    def wait(self, poll=0.5):
-        """Block the calling thread until :meth:`stop` is called."""
-        while self._tcp is not None:
-            time.sleep(poll)
+    def poll(self, timeout=0.05):
+        """Service the socket for up to ``timeout`` seconds. Returns False once stopped."""
+        if self._listener is None:
+            return False
+        if self._stop_requested:
+            self.stop()
+            return False
+        watch = [self._listener] + list(self._clients)
+        try:
+            readable, _, _ = select.select(watch, [], [], timeout)
+        except (OSError, ValueError):
+            return self.running
+        for sock in readable:
+            if sock is self._listener:
+                self._accept()
+            else:
+                self._read(sock)
+        return self.running
+
+    def serve_forever(self, timeout=0.05):
+        """Run :meth:`poll` on the calling thread until stopped."""
+        self.listen()
+        while self.poll(timeout):
+            pass
+
+    def start(self):
+        """Listen and run :meth:`serve_forever` in a thread (for hosts that can)."""
+        address = self.listen()
+        self._thread = threading.Thread(
+            target=self.serve_forever, name="renderflow-bridge", daemon=True
+        )
+        self._thread.start()
+        return address
 
     def stop(self):
-        tcp, self._tcp = self._tcp, None
-        if tcp is not None:
-            tcp.shutdown()
-            tcp.server_close()
-        self._remove_discovery()
+        """Close everything, remove the discovery file, notify ``on_shutdown``."""
+        self._stop_requested = True
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        with self._close_lock:
+            listener, self._listener = self._listener, None
+            if listener is None:
+                return
+            for sock in list(self._clients):
+                self._drop(sock)
+            listener.close()
+            self._remove_discovery()
         if self.on_shutdown is not None:
             try:
                 self.on_shutdown()
             except Exception:                                       # noqa: BLE001
                 pass
 
-    @property
-    def running(self):
-        return self._tcp is not None
+    def _accept(self):
+        try:
+            conn, _ = self._listener.accept()
+        except OSError:
+            return
+        conn.settimeout(SEND_TIMEOUT_S)
+        self._clients[conn] = b""
+
+    def _drop(self, sock):
+        self._clients.pop(sock, None)
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _read(self, sock):
+        try:
+            data = sock.recv(65536)
+        except OSError:
+            data = b""
+        if not data:
+            self._drop(sock)
+            return
+        buffer = self._clients.get(sock, b"") + data
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            if line.strip():
+                self._respond(sock, line)
+        if sock in self._clients:
+            self._clients[sock] = buffer
+
+    def _respond(self, sock, line):
+        try:
+            request = protocol.loads(line)
+        except ValueError as exc:
+            response = {"id": None, "ok": False,
+                        "error": {"type": "ValueError", "message": "bad JSON: %s" % exc}}
+        else:
+            response = self.handle_request(request)
+        try:
+            payload = protocol.dumps(response)
+        except (TypeError, ValueError) as exc:
+            payload = protocol.dumps({
+                "id": response.get("id"), "ok": False,
+                "error": {"type": "TypeError", "message": "result not serialisable: %s" % exc},
+            })
+        try:
+            sock.sendall(payload)
+        except OSError:
+            self._drop(sock)
 
     # ------------------------------------------------------------ discovery
     def _write_discovery(self):
@@ -187,37 +289,3 @@ class BridgeServer(object):
             os.remove(self.discovery_path)
         except (OSError, ValueError):
             pass
-
-
-class _Handler(socketserver.StreamRequestHandler):
-    def handle(self):
-        bridge = self.server.bridge
-        while True:
-            line = self.rfile.readline()
-            if not line:
-                return
-            if not line.strip():
-                continue
-            try:
-                request = protocol.loads(line)
-            except ValueError as exc:
-                response = {"id": None, "ok": False,
-                            "error": {"type": "ValueError", "message": "bad JSON: %s" % exc}}
-            else:
-                response = bridge.handle_request(request)
-            try:
-                self.wfile.write(protocol.dumps(response))
-            except (TypeError, ValueError) as exc:
-                self.wfile.write(protocol.dumps({
-                    "id": response.get("id"), "ok": False,
-                    "error": {"type": "TypeError", "message": "result not serialisable: %s" % exc},
-                }))
-
-
-class _Listener(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-    def __init__(self, address, bridge):
-        self.bridge = bridge
-        socketserver.ThreadingTCPServer.__init__(self, address, _Handler)

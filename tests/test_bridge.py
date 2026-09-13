@@ -367,3 +367,40 @@ def test_connect_direct_only_raises_on_free_edition(monkeypatch):
     monkeypatch.setattr("renderflow.bridge.client.connect_direct", lambda: None)
     with pytest.raises(BridgeUnavailable):
         connect(prefer="direct")
+
+
+# ------------------------------------------------- the in-Resolve situation
+def test_poll_driven_server_needs_no_threads_of_its_own(fake, discovery):
+    """How the in-app launcher runs it: the script's own loop calls poll()."""
+    srv = BridgeServer(fake, port=0, discovery_path=discovery)
+    srv.listen()
+    results = []
+
+    def client_side():
+        with Bridge.discover(discovery, timeout=5.0) as bridge:
+            results.append(bridge.resolve.GetProjectManager().GetCurrentProject().GetName())
+            bridge.shutdown()
+
+    t = threading.Thread(target=client_side)
+    t.start()
+    steps = 0
+    while srv.poll(0.05):            # stand-in for: disp.StepLoop(); server.poll()
+        steps += 1
+        assert steps < 2000, "server never saw the shutdown"
+    t.join(5.0)
+    assert results == ["Demo"]
+    assert not srv.running and not os.path.exists(discovery)
+
+
+def test_client_reports_a_bridge_that_accepts_but_never_answers(discovery, monkeypatch):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    with open(discovery, "w") as fh:
+        json.dump({"host": "127.0.0.1", "port": listener.getsockname()[1], "token": "t"}, fh)
+    monkeypatch.setattr("renderflow.bridge.client.HANDSHAKE_TIMEOUT_S", 0.3)
+    try:
+        with pytest.raises(BridgeUnavailable, match="did not answer"):
+            Bridge.discover(discovery).connect()
+    finally:
+        listener.close()

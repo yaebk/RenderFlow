@@ -68,11 +68,17 @@ def get_bmd():
 
 
 def run_with_window(server, resolve):
-    """Keep Resolve responsive: a tiny status window pumps the UI event loop."""
+    """Keep Resolve responsive: pump the UI toolkit's events and the socket in turn.
+
+    Resolve's UI event loop (``RunLoop``) never yields to other Python threads,
+    so the socket is serviced from this same thread, one step at a time.
+    """
     bmd = get_bmd()
     fusion = globals().get("fusion") or resolve.Fusion()
     ui = fusion.UIManager
     disp = bmd.UIDispatcher(ui)
+    if not hasattr(disp, "StepLoop"):
+        raise RuntimeError("UIDispatcher has no StepLoop")
 
     host, port = server.address
     win = disp.AddWindow(
@@ -86,17 +92,20 @@ def run_with_window(server, resolve):
         ]),
     )
 
+    stopping = []
+
     def stop(ev=None):
-        disp.ExitLoop()
+        stopping.append(True)
 
     win.On.Stop.Clicked = stop
     win.On.RenderFlowBridge.Close = stop
-    server.on_shutdown = stop            # `--shutdown` from outside closes the window too
 
     win.Show()
-    disp.RunLoop()
-    server.on_shutdown = None
-    win.Hide()
+    try:
+        while not stopping and server.poll(0.05):
+            disp.StepLoop()
+    finally:
+        win.Hide()
 
 
 def main():
@@ -107,7 +116,7 @@ def main():
         return
 
     server = BridgeServer(resolve, port=PORT)
-    host, port = server.start()
+    host, port = server.listen()
     print("RenderFlow bridge listening on %s:%d" % (host, port))
     print("discovery file: %s" % server.discovery_path)
 
@@ -115,9 +124,9 @@ def main():
         run_with_window(server, resolve)
     except Exception as exc:                                     # noqa: BLE001
         print("status window unavailable (%s: %s)" % (type(exc).__name__, exc))
-        print("bridge is still running; Resolve's UI may be unresponsive until it stops.")
+        print("bridge is still running without a window.")
         print("stop it with:  python -m renderflow.bridge --shutdown")
-        server.wait()
+        server.serve_forever()
     finally:
         server.stop()
         print("RenderFlow bridge stopped.")
