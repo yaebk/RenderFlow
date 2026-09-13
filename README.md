@@ -103,9 +103,29 @@ measured once.
 FFmpeg stands in for Resolve's decoder: it is at least as fast as the free
 edition's, so the ratio is an upper bound on what playback will manage.
 
+## Render cost (built)
+
+```
+python -m renderflow render-cost            # 24-frame sample per timeline clip
+python -m renderflow render-cost --frames 60
+```
+
+FFmpeg can time decoding; only Resolve can time a grade or a Fusion comp. So
+this renders a short sample from the middle of every clip on the timeline
+through Resolve's own render queue and reads back `TimeTakenToRenderInMs`,
+giving milliseconds per frame for the whole pipeline. It reports each clip's
+render speed against real time, how many times heavier it is than the
+cheapest clip, what it carries (Fusion tools, grade nodes), an estimated
+export time for the whole timeline, and each clip's share of it. Frames under
+several tracks are charged once, to the top-most clip.
+
+It uses the cheapest encode available (DNxHR LB) and puts everything back
+afterwards: render format, page, playhead, frame range; the sample job is
+deleted and its files removed; existing queue jobs are untouched.
+
 ## Status
 
-Bridge, scan and decode profiler all verified against a live free-edition
-Resolve 19. Render-cost profiling (effects, via the render queue) and the
-fixer not started. The previous codebase (an adaptive
+Bridge, scan, decode profiler and render-cost profiler all verified against
+a live free-edition Resolve 19. The fixer (proxies, settings, markers,
+render-in-place) not started. The previous codebase (an adaptive
 render-cache scheduler) is preserved in git history at `50a4854`.
