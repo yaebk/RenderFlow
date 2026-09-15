@@ -34,6 +34,11 @@ FUSION_PASSTHROUGH = {"MediaIn", "MediaOut", "AudioDisplay", "Loader", "Saver"}
 SEVERITY_ORDER = {"high": 0, "medium": 1, "info": 2}
 
 
+def sort_findings(findings: "list[Finding]") -> "list[Finding]":
+    """Order findings high -> medium -> info, then by subject."""
+    return sorted(findings, key=lambda f: (SEVERITY_ORDER[f.severity], f.subject))
+
+
 @dataclass
 class ClipInfo:
     name: str
@@ -55,7 +60,6 @@ class ClipInfo:
     location: str = "local"         # local | onedrive | network | removable | missing
     size_bytes: int | None = None
     on_timeline: bool = False
-    fusion_comps: int = 0
     fusion_tools: list[str] = field(default_factory=list)   # real tools, passthrough excluded
     color_nodes: int = 0
     unique_id: str = ""
@@ -83,7 +87,8 @@ class TimelineInfo:
     video_tracks: int
     clip_count: int
     start_frame: int = 0
-    items: list[dict] = field(default_factory=list)   # name, track, start, end, clip (name)
+    # one dict per timeline item: name, track, start, end, clip, label, fusion_tools, color_nodes
+    items: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -101,7 +106,7 @@ class ProjectSettings:
 class Finding:
     severity: str                   # high | medium | info
     code: str
-    subject: str                    # clip name, or "project"
+    subject: str                    # clip name, timeline item label, or "project"
     message: str
     why: str
 
@@ -128,7 +133,8 @@ class ScanReport:
     def by_severity(self, severity: str) -> list[Finding]:
         return [f for f in self.findings if f.severity == severity]
 
-    def text(self) -> str:
+    def inventory_text(self) -> str:
+        """Header, settings and the clip table - everything except the findings."""
         lines = [f"project  : {self.project}"]
         if self.timeline:
             t = self.timeline
@@ -154,15 +160,26 @@ class ScanReport:
             lines.append(f"{name:<34} {c.codec[:18]:<18} {c.width}x{c.height:>4} {c.fps:>5g} "
                          f"{c.bit_depth:>3} {c.seconds:>6.0f} {c.location:<9} {c.proxy[:6]:<6} "
                          f"{', '.join(fx)}")
-        lines.append("")
-        if not self.findings:
-            lines.append("no findings - nothing here looks like a bottleneck.")
-        for severity in ("high", "medium", "info"):
-            group = self.by_severity(severity)
-            if group:
-                lines.append(f"--- {severity} ({len(group)}) ---")
-                lines.extend(str(f) for f in group)
         return "\n".join(lines)
+
+    def findings_text(self) -> str:
+        return findings_text(self.findings, "no findings - nothing here looks like a bottleneck.")
+
+    def text(self) -> str:
+        return self.inventory_text() + "\n\n" + self.findings_text()
+
+
+def findings_text(findings: list[Finding], empty: str) -> str:
+    """Findings grouped by severity, or ``empty`` when there are none."""
+    if not findings:
+        return empty
+    lines = []
+    for severity in SEVERITY_ORDER:
+        group = [f for f in findings if f.severity == severity]
+        if group:
+            lines.append(f"--- {severity} ({len(group)}) ---")
+            lines.extend(str(f) for f in group)
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------ parsing
@@ -223,7 +240,7 @@ def windows_drive_type(path: str) -> int | None:
     try:
         import ctypes
         return int(ctypes.windll.kernel32.GetDriveTypeW(drive + "\\"))  # type: ignore[attr-defined]
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -279,7 +296,7 @@ def read_clips(project, **kw) -> list[ClipInfo]:
             clip = clip_from_properties(props, **kw)
             try:
                 clip.unique_id = str(item.GetUniqueId() or "")
-            except Exception:                                       # noqa: BLE001
+            except Exception:
                 clip.unique_id = ""
             clips.append(clip)
     return clips
@@ -315,20 +332,17 @@ def read_timeline(project, clips: list[ClipInfo]) -> TimelineInfo | None:
             clip = _match_clip(item, by_id, by_path)
             tools = _fusion_tools(item)
             nodes = _node_count(item)
-            try:
-                name, start = str(item.GetName()), _int(item.GetStart())
-                items.append({"name": name, "track": index, "start": start,
-                              "end": _int(item.GetEnd()), "clip": clip.name if clip else "",
-                              "label": item_label(name, index, start, fps),
-                              "fusion_tools": tools, "color_nodes": nodes})
-            except Exception:                                       # noqa: BLE001
-                pass
+            name, start = str(item.GetName()), _int(item.GetStart())
+            items.append({"name": name, "track": index, "start": start,
+                          "end": _int(item.GetEnd()), "clip": clip.name if clip else "",
+                          "label": item_label(name, index, start, fps),
+                          "fusion_tools": tools, "color_nodes": nodes})
             if clip is None:
                 continue
+            # The clip table shows each source clip's heaviest use on the timeline.
             clip.on_timeline = True
-            clip.fusion_comps = max(clip.fusion_comps, _safe_int(item.GetFusionCompCount))
             if len(tools) > len(clip.fusion_tools):
-                clip.fusion_tools = tools          # worst use, for the clip table
+                clip.fusion_tools = tools
             clip.color_nodes = max(clip.color_nodes, nodes)
     return TimelineInfo(
         name=str(timeline.GetName()),
@@ -345,7 +359,7 @@ def read_timeline(project, clips: list[ClipInfo]) -> TimelineInfo | None:
 def _match_clip(item, by_id, by_path):
     try:
         media = item.GetMediaPoolItem()
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         return None
     if media is None:
         return None
@@ -353,18 +367,18 @@ def _match_clip(item, by_id, by_path):
         uid = str(media.GetUniqueId() or "")
         if uid in by_id:
             return by_id[uid]
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         pass
     try:
         return by_path.get(str(media.GetClipProperty("File Path") or ""))
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         return None
 
 
 def _safe_int(fn) -> int:
     try:
         return _int(fn())
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         return 0
 
 
@@ -380,7 +394,7 @@ def _fusion_tools(item) -> list[str]:
                 reg_id = str((tool.GetAttrs() or {}).get("TOOLS_RegID") or "")
                 if reg_id and reg_id not in FUSION_PASSTHROUGH:
                     found.append(reg_id)
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         pass
     return found
 
@@ -389,7 +403,7 @@ def _node_count(item) -> int:
     try:
         graph = item.GetNodeGraph()
         return _int(graph.GetNumNodes()) if graph is not None else 0
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         return 0
 
 
@@ -421,21 +435,14 @@ def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
             continue
 
         if c.long_gop and software_decode:
-            heavy = c.bit_depth >= 10 or c.width >= 3840 or c.fps > 30 or "265" in c.codec or "HEVC" in c.codec.upper()
-            out.append(Finding(
-                "high" if heavy else "medium", "codec-long-gop", c.name,
-                f"{c.codec} is decoded in software on the free edition",
-                "Long-GOP codecs (H.264/H.265/AV1) are the usual cause of stuttering on Windows: "
-                "the free edition does not use the GPU to decode them, and every frame depends on "
-                "its neighbours so scrubbing is worst. A proxy (DNxHR/ProRes) removes this entirely."
-                + (" This one is heavy: " + ", ".join(
-                    part for part, on in (
-                        (f"{c.bit_depth}-bit", c.bit_depth >= 10),
-                        (f"{c.width}x{c.height}", c.width >= 3840),
-                        (f"{c.fps:g} fps", c.fps > 30),
-                        ("H.265", "265" in c.codec or "HEVC" in c.codec.upper()),
-                    ) if on) + "." if heavy else ""),
-            ))
+            heavy_parts = _heavy_decode_parts(c)
+            why = ("Long-GOP codecs (H.264/H.265/AV1) are the usual cause of stuttering on Windows: "
+                   "the free edition does not use the GPU to decode them, and every frame depends on "
+                   "its neighbours so scrubbing is worst. A proxy (DNxHR/ProRes) removes this entirely.")
+            if heavy_parts:
+                why += " This one is heavy: " + ", ".join(heavy_parts) + "."
+            out.append(Finding("high" if heavy_parts else "medium", "codec-long-gop", c.name,
+                               f"{c.codec} is decoded in software on the free edition", why))
 
         if c.location == "onedrive":
             out.append(Finding("medium", "media-onedrive", c.name,
@@ -517,8 +524,21 @@ def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
                            "Playback -> Render Cache -> Smart caches effect-heavy clips in the "
                            "background so they play without re-rendering."))
 
-    out.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.subject))
-    return out
+    return sort_findings(out)
+
+
+def _heavy_decode_parts(c: ClipInfo) -> list[str]:
+    """What makes a long-GOP clip expensive to decode, as short phrases."""
+    parts = []
+    if c.bit_depth >= 10:
+        parts.append(f"{c.bit_depth}-bit")
+    if c.width >= 3840:
+        parts.append(f"{c.width}x{c.height}")
+    if c.fps > 30:
+        parts.append(f"{c.fps:g} fps")
+    if "265" in c.codec or "HEVC" in c.codec.upper():
+        parts.append("H.265")
+    return parts
 
 
 # --------------------------------------------------------------------- entry

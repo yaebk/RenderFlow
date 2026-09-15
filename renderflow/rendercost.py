@@ -39,7 +39,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from renderflow.scan import Finding, _fusion_tools, _int, _node_count, item_label
+from renderflow.scan import Finding, _fusion_tools, _int, _node_count, item_label, sort_findings
 
 DEFAULT_SECONDS = 10.0          # long sample, in timeline seconds
 DEFAULT_SHORT_SECONDS = 2.0     # short sample; slope between the two cancels job set-up
@@ -242,7 +242,7 @@ class RenderQueue:
         finally:
             try:
                 self.project.DeleteRenderJob(job)
-            except Exception:                                       # noqa: BLE001
+            except Exception:
                 pass
             self._remove_outputs(name)
 
@@ -263,7 +263,7 @@ def choose_format(project) -> tuple[str, str]:
     for fmt, codec in PREFERRED:
         try:
             codecs = project.GetRenderCodecs(fmt) or {}
-        except Exception:                                           # noqa: BLE001
+        except Exception:
             continue
         if codec in codecs.values():
             return fmt, codec
@@ -275,6 +275,7 @@ def choose_format(project) -> tuple[str, str]:
 
 # ------------------------------------------------------------- measuring
 def timeline_items(timeline) -> list[dict[str, Any]]:
+    """Every non-empty item on every video track, with what it carries."""
     items = []
     for track in range(1, _int(timeline.GetTrackCount("video")) + 1):
         for item in timeline.GetItemListInTrack("video", track) or []:
@@ -461,5 +462,4 @@ def render_findings(profile: RenderProfile) -> list[Finding]:
                                f"accounts for {share:.0%} of the estimated export time",
                                "Whatever this clip carries is where export time goes. Simplify "
                                "or pre-render it and the whole export speeds up."))
-    out.sort(key=lambda f: ({"high": 0, "medium": 1, "info": 2}[f.severity], f.subject))
-    return out
+    return sort_findings(out)

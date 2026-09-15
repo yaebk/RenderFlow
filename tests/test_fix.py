@@ -9,7 +9,7 @@ import pytest
 
 from renderflow.fix import Action, Journal, apply, plan, plan_text, undo
 from renderflow.rendercost import RenderProfile, RenderSample
-from renderflow.report import FullReport, full_report
+from renderflow.report import full_report
 from renderflow.scan import (
     Finding,
     ProjectSettings,

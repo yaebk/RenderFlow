@@ -36,7 +36,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
-from renderflow.scan import ClipInfo, Finding, ScanReport
+from renderflow.scan import ClipInfo, Finding, ScanReport, sort_findings
 
 DEFAULT_SAMPLE_S = 5.0
 DEFAULT_SEEKS = 5
@@ -130,7 +130,11 @@ def parse_progress(stdout: str) -> int:
 def measure_decode(path: str, clip_fps: float, duration_s: float | None = None,
                    sample_s: float = DEFAULT_SAMPLE_S, seeks: int = DEFAULT_SEEKS,
                    hwaccel: str | None = None, exe: str | None = None,
-                   runner: Runner = run_command) -> DecodeMeasure:
+                   runner: Runner = run_command, version: str | None = None) -> DecodeMeasure:
+    """Decode a ``sample_s`` slice from the middle of ``path`` and time it.
+
+    ``version`` is the ffmpeg build string, looked up if not given.
+    """
     exe = require_ffmpeg(exe)
     duration_s = duration_s or 0.0
     start = max(0.0, duration_s / 2 - sample_s / 2) if duration_s > sample_s else 0.0
@@ -158,15 +162,18 @@ def measure_decode(path: str, clip_fps: float, duration_s: float | None = None,
         realtime_ratio=round(decode_fps / clip_fps, 2) if clip_fps else 0.0,
         seek_ms=seek_ms,
         hwaccel=hwaccel,
-        ffmpeg=ffmpeg_version(exe, runner),
+        ffmpeg=version or ffmpeg_version(exe, runner),
         cpu=platform.processor() or platform.machine(),
         measured_at=time.time(),
     )
 
 
 def _measure_seeks(exe, path, duration_s, seeks, hwaccel, runner) -> float:
-    """Mean wall time to decode one frame at spread-out positions, minus process start."""
-    # Process start-up and teardown cost, so the number is about the file, not the OS.
+    """Mean wall time to decode one frame at spread-out positions.
+
+    Process start-up and teardown are measured on a tiny synthetic input and
+    subtracted, so the number is about the file, not the OS.
+    """
     _, _, overhead = runner([exe, "-hide_banner", "-nostdin", "-v", "error",
                              "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1",
                              "-frames:v", "1", "-f", "null", "-"])
@@ -249,7 +256,7 @@ def profile(report: ScanReport, sample_s: float = DEFAULT_SAMPLE_S, seeks: int =
                 progress(f"measuring {clip.name} ...")
             try:
                 measure = measure_decode(clip.path, clip.fps, clip.seconds, sample_s, seeks,
-                                         hwaccel, exe, runner)
+                                         hwaccel, exe, runner, version)
             except RuntimeError as exc:
                 if progress:
                     progress(f"  skipped: {exc}")
@@ -275,7 +282,7 @@ def apply_measurements(report: ScanReport, results: dict[str, DecodeMeasure]) ->
             continue
         clip.measured = asdict(measure)
         report.findings.extend(decode_findings(clip, measure))
-    report.findings.sort(key=lambda f: ({"high": 0, "medium": 1, "info": 2}[f.severity], f.subject))
+    report.findings = sort_findings(report.findings)
 
 
 def _clip_path(report: ScanReport, name: str) -> str | None:

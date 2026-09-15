@@ -4,19 +4,15 @@
 localhost TCP listener. Every request is checked against a per-session token,
 decoded, run against the API, and the result encoded back.
 
-WHY IT IS SINGLE-THREADED
--------------------------
-The first version answered requests from a background thread. Inside Resolve
-that thread never ran: the script's main thread sat in the UI toolkit's event
-loop, which does not yield to other Python threads, so clients connected and
-then waited forever. So the server has no threads of its own. Everything
-happens in :meth:`poll`, which the caller drives from whatever loop it is
-already running - the in-app launcher alternates UI event pumping with
-``poll()``; tests and other hosts can use :meth:`start` to run that loop in a
-thread of their own.
+The server has no threads of its own. Inside Resolve the script's main thread
+sits in the UI toolkit's event loop, which never yields to other Python
+threads, so a server thread would never run. Instead everything happens in
+:meth:`poll`, which the caller drives from its own loop: the in-app launcher
+alternates UI event pumping with ``poll()``. Hosts that can run a thread (the
+tests) use :meth:`start`.
 
-The request handling is separate from the socket code so it can be tested
-against a fake ``resolve`` with no network at all - see ``handle_request``.
+Request handling (:meth:`handle_request`) is separate from the socket code so
+it can be tested against a fake ``resolve`` with no network.
 
 Runs on the Python Resolve embeds: standard library only, Python 3.6 syntax.
 """
@@ -96,7 +92,7 @@ class BridgeServer(object):
                 raise BridgeError("unknown op %r" % (op,))
             self.requests_served += 1
             return {"id": request_id, "ok": True, "result": result}
-        except Exception as exc:                                    # noqa: BLE001
+        except Exception as exc:
             return {
                 "id": request_id,
                 "ok": False,
@@ -111,7 +107,7 @@ class BridgeServer(object):
         version = None
         try:
             version = self.resolve.GetVersionString()
-        except Exception:                                           # noqa: BLE001
+        except Exception:
             pass
         return {
             "protocol": protocol.PROTOCOL_VERSION,
@@ -211,7 +207,7 @@ class BridgeServer(object):
         if self.on_shutdown is not None:
             try:
                 self.on_shutdown()
-            except Exception:                                       # noqa: BLE001
+            except Exception:
                 pass
 
     def _accept(self):
@@ -238,7 +234,7 @@ class BridgeServer(object):
             self._drop(sock)
             return
         buffer = self._clients.get(sock, b"") + data
-        while b"\n" in buffer:
+        while b"\n" in buffer and sock in self._clients:
             line, buffer = buffer.split(b"\n", 1)
             if line.strip():
                 self._respond(sock, line)

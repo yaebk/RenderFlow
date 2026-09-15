@@ -29,11 +29,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from renderflow.profile import find_ffmpeg
 from renderflow.proxies import (
     DEFAULT_MAX_WIDTH,
     DEFAULT_PROXY_DIR,
@@ -47,7 +46,7 @@ from renderflow.scan import ClipInfo, Finding, ScanReport, _walk_folders
 JOURNAL_PATH = Path.home() / ".renderflow" / "journal.json"
 MARKER_TAG = "renderflow"
 ENCODE_SPEED = 4.0                  # proxies encode at roughly this many x real time (measured 5.4x)
-MARKER_COLORS = {"high": "Red", "medium": "Yellow", "info": "Blue"}
+MARKER_COLORS = {"high": "Red", "medium": "Yellow"}
 MARKED_CODES = {"render-heavy", "render-slow", "decode-below-realtime", "decode-marginal",
                 "fusion-comp", "super-scale", "media-missing", "seek-slow"}
 
@@ -81,12 +80,9 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
     # -- proxies ------------------------------------------------------------
     proxy_clips: list[tuple[ClipInfo, str]] = []
     for clip in report.clips:
-        if clip.location == "missing" or clip.proxy not in ("", "None"):
+        if proxies == "none" or clip.location == "missing" or _has_proxy(clip):
             continue
-        if proxies == "none":
-            continue
-        measured = clip.measured or {}
-        ratio = measured.get("realtime_ratio")
+        ratio = (clip.measured or {}).get("realtime_ratio")
         if ratio is not None and ratio < 2.0:
             proxy_clips.append((clip, f"measured decode {ratio:g}x real time"))
         elif proxies == "all" and clip.long_gop and platform != "darwin":
@@ -102,7 +98,7 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
              "timecode": spec.timecode, "seconds": clip.seconds, "source_width": clip.width},
             estimate_s=clip.seconds / ENCODE_SPEED,
         ))
-    has_proxies = bool(proxy_clips) or any(c.proxy not in ("", "None") for c in report.clips)
+    has_proxies = bool(proxy_clips) or any(_has_proxy(c) for c in report.clips)
     if settings and has_proxies and report.settings.proxy_mode != "1":
         actions.append(Action(
             "setting", "project", "Playback -> Proxy Handling -> Prefer Proxies",
@@ -145,7 +141,16 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
     return actions
 
 
+def _has_proxy(clip: ClipInfo) -> bool:
+    return clip.proxy not in ("", "None")
+
+
 def marker_actions(report: ScanReport, findings: list[Finding]) -> list[Action]:
+    """One marker per timeline item that has a high or medium finding.
+
+    Findings are matched by item label first, then by clip name (decode
+    findings are per source clip, not per timeline item).
+    """
     out: list[Action] = []
     by_subject: dict[str, list[Finding]] = {}
     for f in findings:
@@ -220,6 +225,7 @@ def _media_item_by_path(project, path: str):
 
 
 def _timeline_named(project, name: str):
+    """The project's timeline called ``name``, or None if there is no such timeline."""
     current = project.GetCurrentTimeline()
     if current is not None and str(current.GetName()) == name:
         return current
@@ -228,9 +234,9 @@ def _timeline_named(project, name: str):
             timeline = project.GetTimelineByIndex(index)
             if timeline is not None and str(timeline.GetName()) == name:
                 return timeline
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         pass
-    return current
+    return None
 
 
 def apply(resolve, actions: list[Action], journal: Journal | None = None,
@@ -246,8 +252,6 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
         p = action.params
         try:
             if action.kind == "proxy":
-                if find_ffmpeg() is None and ffmpeg is None:
-                    raise RuntimeError("ffmpeg not found")
                 spec = ProxySpec(p["path"], p["target"], p["width"], p["height"], p["timecode"], p["seconds"])
                 kwargs = {"runner": proxy_runner} if proxy_runner else {}
                 generate_proxy(spec, action.subject, p["source_width"], exe=ffmpeg, progress=say, **kwargs)
@@ -281,7 +285,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
             elif action.kind == "marker":
                 timeline = _timeline_named(project, p["timeline"])
                 if timeline is None:
-                    raise RuntimeError("timeline not open")
+                    raise RuntimeError(f"timeline {p['timeline']!r} not found")
                 if not timeline.AddMarker(p["frame"], p["color"], p["name"], p["note"],
                                           p["duration"], p["custom"]):
                     raise RuntimeError("AddMarker refused")
@@ -290,7 +294,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 say(f"  marked {action.subject}")
             else:
                 raise RuntimeError(f"unknown action kind {action.kind}")
-        except Exception as exc:                                    # noqa: BLE001
+        except Exception as exc:
             problems.append(f"{action.kind} {action.subject}: {exc}")
             say(f"  FAILED {action.kind} {action.subject}: {exc}")
     return problems
@@ -327,10 +331,11 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
                 say(f"  {entry['subject']}: {entry['key']} restored to {entry['old']}")
             elif kind == "marker":
                 timeline = _timeline_named(project, entry["timeline"])
-                if timeline is not None:
-                    timeline.DeleteMarkerByCustomData(entry["custom"])
+                if timeline is None:
+                    raise RuntimeError(f"timeline {entry['timeline']!r} not found")
+                timeline.DeleteMarkerByCustomData(entry["custom"])
                 say(f"  removed marker on {entry['subject']}")
-        except Exception as exc:                                    # noqa: BLE001
+        except Exception as exc:
             problems.append(f"{entry.get('kind')} {entry.get('subject')}: {exc}")
             remaining.append(entry)
     journal.entries = list(reversed(remaining))

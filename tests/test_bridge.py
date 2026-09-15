@@ -133,7 +133,7 @@ def req(server, op, **fields):
 
 # -------------------------------------------------------------- protocol
 def test_encode_primitives_and_containers_pass_through():
-    reg = lambda obj: (99, "X")  # noqa: E731
+    reg = lambda obj: (99, "X")
     value = {"a": [1, 2.5, "s", None, True], "b": {"c": (1, 2)}}
     assert protocol.encode(value, reg) == {"a": [1, 2.5, "s", None, True], "b": {"c": [1, 2]}}
 
@@ -305,7 +305,7 @@ def test_calls_are_serialised_across_connections(server, discovery):
                 for _ in range(50):
                     assert bridge.resolve.GetVersionString() == "19.0"
                     assert bridge.resolve.GetCurrentPage() == "edit"
-        except Exception as exc:                                    # noqa: BLE001
+        except Exception as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=worker) for _ in range(4)]

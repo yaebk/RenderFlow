@@ -3,10 +3,7 @@ real Resolve 19 returned over the bridge, so the fakes are not invented."""
 
 import json
 
-import pytest
-
 from renderflow.scan import (
-    ClipInfo,
     ProjectSettings,
     TimelineInfo,
     classify_location,
@@ -218,7 +215,7 @@ def test_scan_walks_folders_skips_non_video_and_matches_timeline():
     assert [(i["name"], i["track"], i["start"], i["end"], i["clip"]) for i in t.items] == [
         ("cam.mp4", 1, 216000, 217029, "cam.mp4"), ("b.mov", 1, 216000, 217029, "b.mov")]
     assert all(c.on_timeline for c in report.clips)
-    assert report.clips[0].fusion_comps == 1 and report.clips[0].fusion_tools == []
+    assert report.clips[0].fusion_tools == []
     assert report.clips[1].color_nodes == 6
     assert report.settings.proxy_mode == "2" and report.settings.optimized_media_on
 

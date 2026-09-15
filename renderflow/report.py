@@ -7,15 +7,13 @@ justify. ``text()`` is for a person; ``to_dict()`` is for a tool or an agent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from renderflow.fix import Action, plan, plan_text
 from renderflow.profile import DecodeMeasure, FFmpegMissing, measured_text, profile
 from renderflow.rendercost import RenderProfile, render_cost, render_findings
-from renderflow.scan import Finding, ScanReport, scan
-
-SEVERITY_ORDER = {"high": 0, "medium": 1, "info": 2}
+from renderflow.scan import Finding, ScanReport, findings_text, scan, sort_findings
 
 
 @dataclass
@@ -31,37 +29,24 @@ class FullReport:
         return {
             "scan": self.scan.to_dict(),
             "render": self.render.to_dict() if self.render else None,
-            "findings": [f.__dict__ for f in self.findings],
-            "actions": [{"kind": a.kind, "subject": a.subject, "summary": a.summary,
-                         "why": a.why, "estimate_s": round(a.estimate_s, 1), "params": a.params}
-                        for a in self.actions],
+            "findings": [asdict(f) for f in self.findings],
+            "actions": [{**asdict(a), "estimate_s": round(a.estimate_s, 1)} for a in self.actions],
             "skipped": self.skipped,
         }
 
     def text(self) -> str:
-        parts = [self.scan.text().split("\n--- ")[0].rstrip()]        # header + clip table only
+        parts = [self.scan.inventory_text()]
         if self.decode:
             parts.append("DECODE (FFmpeg, CPU)\n" + measured_text(self.scan, self.decode))
         if self.render:
             parts.append("RENDER (Resolve's queue)\n" + self.render.text())
         if self.skipped:
             parts.append("skipped: " + "; ".join(self.skipped))
-        parts.append("FINDINGS\n" + findings_text(self.findings))
+        parts.append("FINDINGS\n" + findings_text(
+            self.findings, "none - nothing measured or observed looks like a bottleneck."))
         parts.append("PLAN\n" + plan_text(self.actions) +
                      ("\n\napply with:  python -m renderflow fix --apply" if self.actions else ""))
         return "\n\n".join(parts)
-
-
-def findings_text(findings: list[Finding]) -> str:
-    if not findings:
-        return "none - nothing measured or observed looks like a bottleneck."
-    lines = []
-    for severity in ("high", "medium", "info"):
-        group = [f for f in findings if f.severity == severity]
-        if group:
-            lines.append(f"--- {severity} ({len(group)}) ---")
-            lines.extend(str(f) for f in group)
-    return "\n".join(lines)
 
 
 def full_report(resolve, decode: bool = True, render: bool = True, proxies: str = "auto",
@@ -92,7 +77,6 @@ def full_report(resolve, decode: bool = True, render: bool = True, proxies: str 
     findings = list(scan_report.findings)
     if report.render:
         findings.extend(render_findings(report.render))
-    findings.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.subject))
-    report.findings = findings
-    report.actions = plan(scan_report, report.render, findings, proxies=proxies)
+    report.findings = sort_findings(findings)
+    report.actions = plan(scan_report, report.render, report.findings, proxies=proxies)
     return report

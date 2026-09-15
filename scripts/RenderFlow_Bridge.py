@@ -1,49 +1,34 @@
 """RenderFlow bridge - run this from inside DaVinci Resolve.
 
-============================================================================
-INSTALL
-============================================================================
-1. Edit REPO below to point at your RenderFlow checkout.
-2. Copy this file to Resolve's script menu folder:
+Install:
 
-     %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Fusion\\Scripts\\Utility\\
-
+1. Set REPO below to your RenderFlow checkout.
+2. Copy this file to
+   %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Fusion\\Scripts\\Utility\\
 3. In Resolve: Workspace -> Scripts -> RenderFlow_Bridge
 
-A small window appears saying the bridge is listening. Leave it open. From
-any terminal:
+A small window says the bridge is listening; leave it open. From a terminal,
+``python -m renderflow.bridge`` should print your Resolve version, project and
+timeline. Close the window, or run ``python -m renderflow.bridge --shutdown``,
+to stop it.
 
-     python -m renderflow.bridge
-
-should print your Resolve version, project and timeline. Close the window
-(or run ``python -m renderflow.bridge --shutdown``) to stop it.
-
-============================================================================
-WHAT IT DOES
-============================================================================
 The free edition of Resolve lets nothing outside the app use the scripting
-API. This script runs *inside* Resolve, where the API is available, and
-relays calls from outside over a localhost socket. Only programs on this
-machine can reach it, and every request must carry a token that is written
-to ~/.renderflow/bridge.json when the bridge starts.
-
-Works on Studio too, but there `renderflow.connect()` attaches directly and
-this script is unnecessary.
+API. This script runs inside Resolve, where the API is available, and relays
+calls from outside over a localhost socket. Only programs on this machine can
+reach it, and every request must carry the token written to
+~/.renderflow/bridge.json when the bridge starts. On Studio,
+``renderflow.connect()`` attaches directly and this script is not needed.
 """
 
 import sys
 
-# ==========================================================================
-# CONFIG
-# ==========================================================================
 REPO = r"C:\Users\snake\OneDrive\Documents\GitHub\RenderFlow"
 PORT = 0            # 0 = any free port; clients find it via the discovery file
-# ==========================================================================
 
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from renderflow.bridge.server import BridgeServer          # noqa: E402
+from renderflow.bridge.server import BridgeServer
 
 
 def get_resolve():
@@ -92,10 +77,11 @@ def run_with_window(server, resolve):
         ]),
     )
 
-    stopping = []
+    stopping = False
 
     def stop(ev=None):
-        stopping.append(True)
+        nonlocal stopping
+        stopping = True
 
     win.On.Stop.Clicked = stop
     win.On.RenderFlowBridge.Close = stop
@@ -122,7 +108,7 @@ def main():
 
     try:
         run_with_window(server, resolve)
-    except Exception as exc:                                     # noqa: BLE001
+    except Exception as exc:
         print("status window unavailable (%s: %s)" % (type(exc).__name__, exc))
         print("bridge is still running without a window.")
         print("stop it with:  python -m renderflow.bridge --shutdown")

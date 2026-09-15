@@ -14,6 +14,7 @@
 import argparse
 import json
 import sys
+from dataclasses import asdict
 
 from renderflow.bridge.client import BridgeUnavailable, RemoteError, connect
 from renderflow.fix import Journal, apply, plan_text, undo
@@ -145,7 +146,7 @@ def main(argv=None) -> int:
             findings = render_findings(rc)
             if args.json:
                 data = rc.to_dict()
-                data["findings"] = [f.__dict__ for f in findings]
+                data["findings"] = [asdict(f) for f in findings]
                 json.dump(data, sys.stdout, indent=2)
                 print()
             else:

@@ -234,7 +234,7 @@ def connect_direct() -> Any | None:
         return None
     try:
         return dvr.scriptapp("Resolve")
-    except Exception:                                               # noqa: BLE001
+    except Exception:
         return None
 
 
