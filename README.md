@@ -36,12 +36,13 @@ localhost:
    A small window opens and says it is listening. Leave it open.
 3. Check the connection from a terminal:
 
-```
-python -m renderflow.bridge
-```
+   ```
+   python -m renderflow.bridge
+   ```
 
-This prints the Resolve version, the project and the current timeline. On
-Resolve Studio the bridge is not needed; RenderFlow connects directly.
+   This prints the Resolve version, the project and the current timeline.
+
+On Resolve Studio the bridge is not needed; RenderFlow connects directly.
 
 ## Usage
 
@@ -55,7 +56,8 @@ python -m renderflow fix --undo      # reverse them
 `report` runs three measurements and prints ranked findings plus a plan.
 `report --json` gives the same thing as JSON. `--no-render` skips the
 render-queue measurement, which is the slow part (roughly 15-30 s per
-timeline clip).
+timeline clip the first time; after that the samples come from a cache).
+`--remeasure` ignores the caches.
 
 Each measurement can also be run on its own:
 
@@ -88,16 +90,21 @@ per file in `~/.renderflow/measurements.json`.
 a Fusion comp. So RenderFlow renders a short and a long sample of each timeline
 clip through Resolve's own render queue and takes the slope between them,
 which removes the fixed per-job overhead and gives true milliseconds per frame
-for the whole pipeline. Clips under 120 frames are not measured: below that
-Resolve's per-job set-up time swamps the per-frame cost, and a single sample
-would read as a heavy clip. It reports each clip's render speed against real time,
-how many times heavier it is than the cheapest clip, its share of total export
-time, and an estimated export time for the timeline. It uses the cheapest
-encoder available (DNxHR LB), deletes the sample jobs and files, and restores
-the render format, page, playhead and range afterwards. Existing queue jobs
-are not touched. Samples are cached in `~/.renderflow/render.json` so that
-`report` followed by `fix` does not render everything twice; `--remeasure`
-forces a fresh run, which you want after changing an effect's settings.
+for the whole pipeline. It reports each clip's render speed against real time,
+its share of total export time, and an estimated export time for the
+timeline.
+
+Clips under 120 frames are not measured. Below that Resolve's per-job set-up
+time swamps the per-frame cost and a single sample would read as a heavy
+clip, so the table says "too short to measure" instead.
+
+It uses the cheapest encoder available (DNxHR LB), deletes the sample jobs and
+files, and restores the render format, page, playhead and range afterwards.
+Existing queue jobs are not touched. Samples are cached in
+`~/.renderflow/render.json` so that `report` followed by `fix` does not render
+everything twice. The cache key covers the clip, its position and length, its
+Fusion tools and grade node count, and the timeline format; it does not see a
+changed parameter inside an existing effect, so use `--remeasure` after that.
 
 ## What it fixes
 
@@ -108,12 +115,18 @@ Only what the measurements support:
   along with the *Prefer Proxies* setting Resolve needs to actually use them.
 - Render Cache set to Smart when a clip renders heavy and carries effects.
 - Super Scale turned off.
-- Timeline markers over clips with findings.
+- Timeline markers over clips with high or medium findings: red for high,
+  yellow for medium, the finding in the note. Resolve allows one marker per
+  frame, so clips on different tracks that start together share one, and a
+  frame that already has a marker of your own is left alone (the plan says
+  which).
 
-`fix --apply` writes a journal to `~/.renderflow/journal.json`; `fix --undo`
-walks it backwards, and also clears any RenderFlow marker left on the timeline
-even if the journal is gone (they are tagged). `--proxies all` forces proxies for every long-GOP clip;
-`--proxies none`, `--no-markers` and `--no-settings` narrow the plan.
+`fix` alone prints the plan and changes nothing. `fix --apply` writes a
+journal to `~/.renderflow/journal.json` as it goes; `fix --undo` walks it
+backwards, and also clears any RenderFlow marker still on the timeline even if
+the journal is gone (they are tagged). `--proxies all` forces proxies for every
+long-GOP clip; `--proxies none`, `--no-markers` and `--no-settings` narrow the
+plan; `--no-render` plans without the render measurement.
 
 Render-in-place is deliberately not included. Smart cache covers the same
 case without freezing the content.
@@ -124,9 +137,9 @@ On a Windows machine running Resolve 19 free edition, a plain 1080p60 H.264
 screen capture decoded at 375 fps (6x real time) and rendered at 3-4 ms per
 frame. The scan's rule of thumb had flagged it as slow; the measurement
 overrode that and no proxy was proposed. A copy of the same clip with five
-chained Fusion blurs rendered at 25 ms per frame (0.67x real time, 6x the
-cheapest clip, 66% of export time). For that one the tool proposed Smart cache
-and a marker, applied them, and undid them cleanly.
+chained Fusion blurs rendered at 25 ms per frame (0.67x real time, 66% of
+export time). For that one the tool proposed Smart cache and a marker, applied
+them, and undid them cleanly.
 
 ## Using it from code
 
@@ -162,8 +175,15 @@ decode test needs FFmpeg and is skipped without it.
 Resolve exposes no playback timing, so there are no before/after playback
 numbers; decode and render measurements stand in for them. The render sample
 includes an encode, so playback is a little faster than the render ratio
-suggests, but the ranking between clips holds. Studio's direct connection is
-implemented but has only been tested against the free edition.
+suggests, but the ranking between clips holds.
+
+Render cost is measured per clip, so a fast-cut timeline where nothing lasts
+120 frames gets no render numbers at all; the decode measurement and the
+scan still apply. Measuring longer stretches of such a timeline is the
+obvious next step.
+
+Studio's direct connection is implemented but has only been tested against
+the free edition.
 
 ## Authors
 
