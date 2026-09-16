@@ -9,6 +9,7 @@
     python -m renderflow scan               # inventory + rule-of-thumb findings only
     python -m renderflow profile            # scan + decode speed of every clip
     python -m renderflow render-cost        # time a sample of every timeline clip in Resolve's queue
+    python -m renderflow tools              # which Fusion tool costs what, on the clips that measured heavy
 
     python -m renderflow install-bridge     # put the in-app launcher in Resolve's Scripts menu
 """
@@ -39,6 +40,7 @@ from renderflow.rendercost import (
 )
 from renderflow.report import full_report
 from renderflow.scan import findings_text, scan
+from renderflow.tools import attribute, restore_bypassed, tool_findings
 
 
 def _stderr(msg: str) -> None:
@@ -66,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--json", action="store_true", help="machine-readable output")
     p_rep.add_argument("--no-decode", action="store_true", help="skip FFmpeg decode measurement")
     p_rep.add_argument("--no-render", action="store_true", help="skip render-queue measurement")
+    p_rep.add_argument("--tools", action="store_true",
+                       help="also measure which Fusion tool costs what on clips that render heavy (slow)")
     p_rep.add_argument("--proxies", choices=["auto", "all", "none"], default="auto",
                        help="plan proxies for measured-slow clips (auto), every long-GOP clip (all), or none")
     render_args(p_rep)
@@ -99,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc.add_argument("--json", action="store_true", help="machine-readable output")
     render_args(p_rc)
 
+    p_tools = sub.add_parser("tools", help="bypass each Fusion tool in turn on the clips that render "
+                                           "heavy and measure what each one costs")
+    p_tools.add_argument("--json", action="store_true", help="machine-readable output")
+    render_args(p_tools)
+
     p_inst = sub.add_parser("install-bridge",
                             help="copy the in-app launcher into Resolve's Scripts > Utility folder")
     p_inst.add_argument("--dest", default=None, help="scripts folder to write to (default: Resolve's)")
@@ -128,7 +137,7 @@ def main(argv=None) -> int:
 
         if args.command == "report":
             report = full_report(resolve, decode=not args.no_decode, render=not args.no_render,
-                                 proxies=args.proxies, progress=_stderr, **render_kw)
+                                 proxies=args.proxies, tools=args.tools, progress=_stderr, **render_kw)
             if args.json:
                 json.dump(report.to_dict(), sys.stdout, indent=2)
                 print()
@@ -142,6 +151,9 @@ def main(argv=None) -> int:
                 print(f"undoing {len(journal)} change(s) ..." if journal.entries
                       else "the journal is empty - checking the timeline for leftover markers ...")
                 problems = undo(resolve, journal, progress=print)
+                fixed = restore_bypassed(resolve.GetProjectManager().GetCurrentProject())
+                if fixed:
+                    print(f"  re-enabled {len(fixed)} Fusion tool(s) an interrupted run left bypassed")
                 print("done." if not problems else f"{len(problems)} problem(s): " + "; ".join(problems))
                 return 1 if problems else 0
             report = full_report(resolve, decode=True, render=not args.no_render,
@@ -178,6 +190,21 @@ def main(argv=None) -> int:
                          else "no findings - nothing on this timeline was long enough to measure.")
                 print(findings_text(findings, empty))
             return 0
+
+        if args.command == "tools":
+            rc = render_cost(resolve, progress=_stderr, **render_kw)
+            tr = attribute(resolve, rc, progress=_stderr)
+            findings = tool_findings(tr)
+            if args.json:
+                data = tr.to_dict()
+                data["findings"] = [asdict(f) for f in findings]
+                json.dump(data, sys.stdout, indent=2)
+                print()
+            else:
+                print(tr.text())
+                print()
+                print(findings_text(findings, "no findings - no single tool stands out."))
+            return 1 if tr.problems else 0
 
         report = scan(resolve)
         results = {}

@@ -71,7 +71,10 @@ Each measurement can also be run on its own:
 python -m renderflow scan            # inventory and rules of thumb, no measuring
 python -m renderflow profile         # scan plus FFmpeg decode timing
 python -m renderflow render-cost     # render a sample of each timeline clip
+python -m renderflow tools           # which Fusion tool costs what, on the clips that render heavy
 ```
+
+`report --tools` folds the last one into the full report.
 
 ## What it measures
 
@@ -116,6 +119,20 @@ Existing queue jobs are not touched. Samples are cached in
 everything twice. The cache key covers the clip, its position and length, its
 Fusion tools and grade node count, and the timeline format; it does not see a
 changed parameter inside an existing effect, so use `--remeasure` after that.
+
+**Fusion tools.** When a clip renders below real time and carries Fusion
+tools, `tools` finds out which tool is responsible: it bypasses each one in
+turn (the node's own pass-through switch), renders the same frames again, and
+reports what each tool's absence saves, per frame. Comps that are
+tool-for-tool identical (a macro dropped on seven clips) are measured once.
+Resolve reports job time in half-second steps, so each figure carries a
+stated +/- and the savings overlap rather than add up; the ranking is what
+to trust. Nothing is deleted or edited: only the pass-through flag is
+touched, only on tools that were on, each is put back right after its
+sample and read back to confirm, and the tools currently bypassed are listed
+in `~/.renderflow/bypassed.json` so a run killed halfway is repaired by the
+next run or by `fix --undo`. A tool the comp cannot render without (a Text+
+template, the OpticalFlow feeding a TimeStretcher) is reported as such.
 
 ## What it fixes
 

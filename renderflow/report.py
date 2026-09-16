@@ -14,6 +14,7 @@ from renderflow.fix import Action, plan, plan_text
 from renderflow.profile import DecodeMeasure, FFmpegMissing, measured_text, profile
 from renderflow.rendercost import RenderProfile, apply_render_measurements, render_cost, render_findings
 from renderflow.scan import Finding, ScanReport, findings_text, scan, sort_findings
+from renderflow.tools import ToolReport, attribute, tool_findings
 
 
 @dataclass
@@ -21,6 +22,7 @@ class FullReport:
     scan: ScanReport
     decode: dict[str, DecodeMeasure] = field(default_factory=dict)
     render: RenderProfile | None = None
+    tools: ToolReport | None = None
     findings: list[Finding] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)        # about the plan, e.g. findings not markable
@@ -30,6 +32,7 @@ class FullReport:
         return {
             "scan": self.scan.to_dict(),
             "render": self.render.to_dict() if self.render else None,
+            "tools": self.tools.to_dict() if self.tools else None,
             "findings": [asdict(f) for f in self.findings],
             "actions": [{**asdict(a), "estimate_s": round(a.estimate_s, 1)} for a in self.actions],
             "notes": self.notes,
@@ -42,6 +45,8 @@ class FullReport:
             parts.append("DECODE (FFmpeg, CPU)\n" + measured_text(self.scan, self.decode))
         if self.render:
             parts.append("RENDER (Resolve's queue)\n" + self.render.text())
+        if self.tools:
+            parts.append("FUSION TOOLS (each bypassed in turn)\n" + self.tools.text())
         if self.skipped:
             parts.append("skipped: " + "; ".join(self.skipped))
         parts.append("FINDINGS\n" + findings_text(
@@ -52,7 +57,8 @@ class FullReport:
 
 
 def full_report(resolve, decode: bool = True, render: bool = True, proxies: str = "auto",
-                progress: Callable[[str], None] | None = None, **render_kw) -> FullReport:
+                tools: bool = False, progress: Callable[[str], None] | None = None,
+                **render_kw) -> FullReport:
     say = progress or (lambda _m: None)
     say("scanning ...")
     scan_report = scan(resolve)
@@ -81,6 +87,14 @@ def full_report(resolve, decode: bool = True, render: bool = True, proxies: str 
     findings = list(scan_report.findings)
     if report.render:
         findings.extend(render_findings(report.render))
+    if tools and report.render:
+        try:
+            report.tools = attribute(resolve, report.render, progress=say)
+            findings.extend(tool_findings(report.tools))
+        except RuntimeError as exc:
+            report.skipped.append(f"Fusion tool attribution ({exc})")
+    elif tools:
+        report.skipped.append("Fusion tool attribution (needs the render measurement)")
     report.findings = sort_findings(findings)
     report.actions = plan(scan_report, report.render, report.findings, proxies=proxies,
                           notes=report.notes)

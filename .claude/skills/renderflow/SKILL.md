@@ -59,6 +59,15 @@ ignores the caches), and a plan of fixes. Nothing is changed. Read:
 For a quick look without rendering (seconds instead of minutes):
 `python -m renderflow report --json --no-render`.
 
+When a clip renders below real time and carries Fusion tools, find out which
+tool is to blame: `python -m renderflow tools --json` (or `report --tools`).
+It bypasses each tool in turn and re-renders; read `comps[].tools[]` for
+`saved_ms_per_frame` per tool (a `status` other than Complete means the comp
+cannot render without that tool). Quote the ranking, not the decimals - the
+report states a +/- and the savings overlap. It changes nothing: every tool
+is put back and checked; `problems[]` must be empty, and if it is not, tell
+the user which tool to check in Fusion.
+
 ## Applying fixes
 
 ```

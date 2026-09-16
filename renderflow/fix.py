@@ -50,7 +50,7 @@ MARKER_TAG = "renderflow"
 ENCODE_SPEED = 4.0                  # proxies encode at roughly this many x real time (measured 5.4x)
 MARKER_COLORS = {"high": "Red", "medium": "Yellow"}
 MARKED_CODES = {"render-heavy", "render-slow", "decode-below-realtime", "decode-marginal",
-                "fusion-comp", "super-scale", "media-missing", "seek-slow"}
+                "fusion-comp", "fusion-tool-heavy", "super-scale", "media-missing", "seek-slow"}
 
 
 @dataclass
