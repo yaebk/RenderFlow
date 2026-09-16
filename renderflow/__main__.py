@@ -34,7 +34,7 @@ from renderflow.rendercost import (
     render_findings,
 )
 from renderflow.report import full_report
-from renderflow.scan import scan
+from renderflow.scan import findings_text, scan
 
 
 def _stderr(msg: str) -> None:
@@ -152,10 +152,7 @@ def main(argv=None) -> int:
             else:
                 print(rc.text())
                 print()
-                if not findings:
-                    print("no findings - every clip renders at or above real time.")
-                for f in findings:
-                    print(f)
+                print(findings_text(findings, "no findings - every clip renders at or above real time."))
             return 0
 
         report = scan(resolve)

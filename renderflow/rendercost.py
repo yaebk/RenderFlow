@@ -427,7 +427,6 @@ def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 def render_findings(profile: RenderProfile) -> list[Finding]:
     out: list[Finding] = []
     good = [s for s in profile.samples if s.ok]
-    cheapest = min((s.ms_per_frame for s in good), default=0.0)
     for s in profile.samples:
         if not s.ok:
             out.append(Finding("medium", "render-sample-failed", s.label,
@@ -442,18 +441,16 @@ def render_findings(profile: RenderProfile) -> list[Finding]:
         if s.color_nodes > 1:
             carries.append(f"a {s.color_nodes}-node grade")
         what = ("; it carries " + " and ".join(carries)) if carries else ""
-        relative = (f" - {s.ms_per_frame / cheapest:.1f}x the cheapest clip on this timeline"
-                    if cheapest and len(good) > 1 else "")
-        rate = f"{s.ms_per_frame:.0f} ms/frame, {ratio:.2f}x real time{relative}"
+        rate = f"{ratio:.2f}x real time ({s.ms_per_frame:.0f} ms/frame)"
         if ratio < 0.5:
             out.append(Finding("high", "render-heavy", s.label,
-                               f"renders far below real time: {rate}",
+                               f"renders at {rate}",
                                "Measured by Resolve's own render queue on this machine, so this "
                                "includes everything: decode, grade, Fusion and scaling" + what +
                                ". Render Cache or render-in-place for this clip is the fix."))
         elif ratio < 1.0:
             out.append(Finding("medium", "render-slow", s.label,
-                               f"renders below real time: {rate}",
+                               f"renders at {rate}",
                                "Includes the sample encode, so playback will be somewhat better "
                                "than this - but any added effect tips it over" + what + "."))
         share = profile.shares.get(s.label, 0.0)

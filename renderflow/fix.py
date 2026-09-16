@@ -64,7 +64,8 @@ class Action:
     def __str__(self) -> str:
         est = f"  (~{self.estimate_s / 60:.0f} min)" if self.estimate_s >= 90 else (
             f"  (~{self.estimate_s:.0f}s)" if self.estimate_s else "")
-        return f"[{self.kind}] {self.subject}: {self.summary}{est}\n         {self.why}"
+        line = f"[{self.kind}] {self.subject}: {self.summary}{est}"
+        return f"{line}\n         {self.why}" if self.why else line
 
 
 # ------------------------------------------------------------------- plan
@@ -175,15 +176,14 @@ def marker_actions(report: ScanReport, findings: list[Finding]) -> list[Action]:
         all_hits = [f for _, hits in marked for f in hits]
         worst = min(all_hits, key=lambda f: 0 if f.severity == "high" else 1)
         first = marked[0][0]
-        subject = first["name"] + (f" (+{len(marked) - 1} more)" if len(marked) > 1 else "")
+        subject = first["label"] + (f" (+{len(marked) - 1} more)" if len(marked) > 1 else "")
         if len(marked) == 1:
             note = "; ".join(f"{f.code}: {f.message}" for f in marked[0][1][:3])
         else:
             note = "; ".join(f"V{item['track']} {item['name']}: {hits[0].code}: {hits[0].message}"
                              for item, hits in marked)
         out.append(Action(
-            "marker", subject, f"{MARKER_COLORS[worst.severity]} marker over the clip: {worst.message}",
-            "Puts the finding on the timeline ruler where you edit, not just in a terminal.",
+            "marker", subject, f"{MARKER_COLORS[worst.severity]} marker: {worst.message}", "",
             {"frame": frame, "duration": max(1, max(i["end"] for i, _ in marked) - first["start"]),
              "color": MARKER_COLORS[worst.severity], "name": f"RenderFlow: {worst.code}",
              "note": note[:500], "custom": f"{MARKER_TAG}:{tl.start_frame + frame}",
@@ -199,6 +199,9 @@ def plan_text(actions: list[Action]) -> str:
     lines = [f"{len(actions)} change(s) planned" + (f", about {total / 60:.0f} min of encoding"
                                                     if total >= 60 else "") + ":"]
     lines.extend(str(a) for a in actions)
+    if any(a.kind == "marker" for a in actions):
+        lines.append("         markers go on the timeline ruler, red = high, yellow = medium; "
+                     "undo removes them.")
     return "\n".join(lines)
 
 
@@ -271,6 +274,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
     project = resolve.GetProjectManager().GetCurrentProject()
     problems: list[str] = []
     say = progress or (lambda _m: None)
+    marked = 0
 
     for action in actions:
         p = action.params
@@ -315,12 +319,14 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                     raise RuntimeError(_marker_refusal(timeline, p["frame"]))
                 journal.add({"kind": "marker", "subject": action.subject, "custom": p["custom"],
                              "timeline": p["timeline"]})
-                say(f"  marked {action.subject}")
+                marked += 1
             else:
                 raise RuntimeError(f"unknown action kind {action.kind}")
         except Exception as exc:
             problems.append(f"{action.kind} {action.subject}: {exc}")
             say(f"  FAILED {action.kind} {action.subject}: {exc}")
+    if marked:
+        say(f"  added {marked} marker(s) to the timeline")
     return problems
 
 
@@ -331,6 +337,7 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
     problems: list[str] = []
     say = progress or (lambda _m: None)
     remaining: list[dict[str, Any]] = []
+    removed = gone = 0
 
     for entry in reversed(journal.entries):
         try:
@@ -358,12 +365,14 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
                 if timeline is None:
                     raise RuntimeError(f"timeline {entry['timeline']!r} not found")
                 if timeline.DeleteMarkerByCustomData(entry["custom"]):
-                    say(f"  removed marker on {entry['subject']}")
+                    removed += 1
                 else:
-                    say(f"  marker on {entry['subject']} was already gone")
+                    gone += 1
         except Exception as exc:
             problems.append(f"{entry.get('kind')} {entry.get('subject')}: {exc}")
             remaining.append(entry)
+    if removed or gone:
+        say(f"  removed {removed} marker(s)" + (f" ({gone} already deleted by hand)" if gone else ""))
     journal.entries = list(reversed(remaining))
     journal.save()
     return problems

@@ -266,7 +266,7 @@ def test_long_gop_is_high_when_heavy_medium_otherwise():
     f_heavy = find_issues([heavy], TL, settings(), platform="win32")
     assert f_light[0].code == "codec-long-gop" and f_light[0].severity == "medium"
     assert f_heavy[0].code == "codec-long-gop" and f_heavy[0].severity == "high"
-    assert "10-bit" in f_heavy[0].why and "3840x2160" in f_heavy[0].why and "H.265" in f_heavy[0].why
+    assert "10-bit" in f_heavy[0].message and "3840x2160" in f_heavy[0].message and "H.265" in f_heavy[0].message
 
 
 def test_long_gop_not_flagged_on_macos_or_for_intra_codecs():

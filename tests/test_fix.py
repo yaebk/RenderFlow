@@ -132,7 +132,7 @@ def test_plan_markers_from_high_and_medium_findings_only():
                 Finding("medium", "seek-slow", "c.mp4", "sticky", "why")]
     actions = plan(rep, findings=findings, settings=False)
     assert [(a.kind, a.subject, a.params["color"]) for a in actions] == [
-        ("marker", "a.mp4", "Red"), ("marker", "c.mp4", "Yellow")]
+        ("marker", "a.mp4 @V1 01:00:00:00", "Red"), ("marker", "c.mp4 @V1 01:00:20:00", "Yellow")]
     a = actions[0].params
     assert a["frame"] == 0 and a["duration"] == 600 and a["custom"] == "renderflow:216000"
     assert "render-heavy" in a["note"] and "fusion-comp" in a["note"]
@@ -161,7 +161,7 @@ def test_plan_one_marker_per_frame_and_skips_occupied_frames():
     actions = plan(rep, findings=findings, settings=False)
     assert len(actions) == 1
     a = actions[0]
-    assert a.subject == "cam.mp4 (+1 more)"
+    assert a.subject == "cam.mp4 @V1 01:00:00:00 (+1 more)"
     assert a.params["color"] == "Red" and a.params["frame"] == 0 and a.params["duration"] == 900
     assert "V1 cam.mp4: decode-marginal" in a.params["note"]
     assert "V3 Adjustment Clip: render-heavy" in a.params["note"]
@@ -329,7 +329,7 @@ def test_undo_tolerates_a_marker_the_editor_already_deleted(tmp_path):
                  "timeline": "Timeline 1"})
     log = []
     assert undo(FakeResolve(project), journal, progress=log.append) == []
-    assert log == ["  marker on cam.mp4 was already gone"]
+    assert log == ["  removed 0 marker(s) (1 already deleted by hand)"]
     assert Journal(tmp_path / "j.json").entries == []
 
 

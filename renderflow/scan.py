@@ -112,8 +112,11 @@ class Finding:
     message: str
     why: str
 
+    def line(self) -> str:
+        return f"[{self.severity}] {self.subject}: {self.message}"
+
     def __str__(self) -> str:
-        return f"[{self.severity}] {self.subject}: {self.message}\n         {self.why}"
+        return f"{self.line()}\n         {self.why}"
 
 
 @dataclass
@@ -172,15 +175,22 @@ class ScanReport:
 
 
 def findings_text(findings: list[Finding], empty: str) -> str:
-    """Findings grouped by severity, or ``empty`` when there are none."""
+    """Findings grouped by severity, or ``empty`` when there are none.
+
+    The explanation (``why``) is the same for every finding with the same
+    code, so it is printed under the first one only.
+    """
     if not findings:
         return empty
     lines = []
+    explained: set[str] = set()
     for severity in SEVERITY_ORDER:
         group = [f for f in findings if f.severity == severity]
         if group:
             lines.append(f"--- {severity} ({len(group)}) ---")
-            lines.extend(str(f) for f in group)
+        for f in group:
+            lines.append(str(f) if f.code not in explained else f.line())
+            explained.add(f.code)
     return "\n".join(lines)
 
 
@@ -447,13 +457,13 @@ def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
 
         if c.long_gop and software_decode:
             heavy_parts = _heavy_decode_parts(c)
-            why = ("Long-GOP codecs (H.264/H.265/AV1) are the usual cause of stuttering on Windows: "
-                   "the free edition does not use the GPU to decode them, and every frame depends on "
-                   "its neighbours so scrubbing is worst. A proxy (DNxHR/ProRes) removes this entirely.")
-            if heavy_parts:
-                why += " This one is heavy: " + ", ".join(heavy_parts) + "."
-            out.append(Finding("high" if heavy_parts else "medium", "codec-long-gop", c.name,
-                               f"{c.codec} is decoded in software on the free edition", why))
+            heavy = f" (heavy: {', '.join(heavy_parts)})" if heavy_parts else ""
+            out.append(Finding(
+                "high" if heavy_parts else "medium", "codec-long-gop", c.name,
+                f"{c.codec} is decoded in software on the free edition{heavy}",
+                "Long-GOP codecs (H.264/H.265/AV1) are the usual cause of stuttering on Windows: "
+                "the free edition does not use the GPU to decode them, and every frame depends on "
+                "its neighbours so scrubbing is worst. A proxy (DNxHR/ProRes) removes this entirely."))
 
         if c.location == "onedrive":
             out.append(Finding("medium", "media-onedrive", c.name,

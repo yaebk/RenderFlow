@@ -351,7 +351,7 @@ def test_findings_thresholds_and_relative_cost():
     assert not any(subject == "fast" for subject, _ in found)     # 200 fps on 60 fps timeline
     assert found[("slow", "render-slow")].severity == "medium"
     heavy = found[("heavy", "render-heavy")]
-    assert heavy.severity == "high" and "20.0x the cheapest" in heavy.message
+    assert heavy.severity == "high" and heavy.message.endswith("0.17x real time (100 ms/frame)")
     dominant = [f for f in render_findings(rc) if f.code == "export-dominant"]
     assert [f.subject for f in dominant] == ["heavy"]              # 100/(5+30+100) = 74%
 
@@ -362,7 +362,6 @@ def test_findings_mention_what_the_clip_carries():
     estimate_export(rc)
     (finding,) = [f for f in render_findings(rc) if f.code == "render-heavy"]
     assert "Blur, Glow" in finding.why and "5-node grade" in finding.why
-    assert "cheapest" not in finding.message                        # single clip: no relative
 
 
 def test_text_and_dict_output():
