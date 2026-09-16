@@ -235,10 +235,14 @@ class FakeTimeline:
 
 
 class FakeProject:
-    def __init__(self, items):
+    def __init__(self, items, name="wowo"):
+        self.name = name
         self.folder = FakeFolder(items)
         self.settings = {"perfProxyMediaMode": "2", "superScale": 3, "perfRenderCacheMode": "none"}
         self.timeline = FakeTimeline()
+
+    def GetName(self):
+        return self.name
 
     def GetMediaPool(self):
         return self
@@ -298,6 +302,7 @@ def test_apply_then_undo_round_trip(tmp_path):
     saved = json.loads((tmp_path / "journal.json").read_text())
     assert [e["kind"] for e in saved["entries"]] == ["proxy", "setting", "setting", "clip-setting", "marker"]
     assert saved["entries"][1] == {**saved["entries"][1], "key": "perfProxyMediaMode", "old": "2"}
+    assert all(e["project"] == "wowo" for e in saved["entries"])
 
     problems = undo(resolve, Journal(tmp_path / "journal.json"), progress=log.append)
     assert problems == []
@@ -362,6 +367,23 @@ def test_undo_keeps_entries_it_could_not_reverse(tmp_path):
     problems = undo(FakeResolve(project), journal)
     assert len(problems) == 1 and project.settings["superScale"] == 3
     assert [e["kind"] for e in Journal(tmp_path / "j.json").entries] == ["clip-setting"]
+
+
+def test_undo_leaves_another_projects_changes_for_that_project(tmp_path):
+    journal = Journal(tmp_path / "j.json")
+    journal.add({"kind": "setting", "subject": "project", "key": "superScale", "old": 3,
+                 "project": "wowo"})
+    journal.add({"kind": "setting", "subject": "project", "key": "perfRenderCacheMode", "old": "none"})
+    other = FakeProject([], name="other")
+    other.settings.update({"superScale": "1", "perfRenderCacheMode": "smart"})
+    problems = undo(FakeResolve(other), journal)
+    assert problems == ["1 change(s) were made to project 'wowo', not 'other' - "
+                        "open that project and run --undo again"]
+    assert other.settings["superScale"] == "1"                  # wowo's change: untouched
+    assert other.settings["perfRenderCacheMode"] == "none"      # unowned (old journal): undone
+    assert [e["key"] for e in Journal(tmp_path / "j.json").entries] == ["superScale"]
+    assert undo(FakeResolve(FakeProject([])), Journal(tmp_path / "j.json")) == []
+    assert Journal(tmp_path / "j.json").entries == []
 
 
 def test_journal_survives_corrupt_file(tmp_path):

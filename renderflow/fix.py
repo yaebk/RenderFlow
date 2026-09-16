@@ -296,6 +296,10 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
     problems: list[str] = []
     say = progress or (lambda _m: None)
     marked = 0
+    name = _project_name(project)
+
+    def record(entry: dict[str, Any]) -> None:
+        journal.add({**entry, "project": name})     # so undo knows which project it belongs to
 
     for action in actions:
         p = action.params
@@ -309,15 +313,15 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                     raise RuntimeError("clip no longer in the media pool")
                 if not item.LinkProxyMedia(p["target"]):
                     raise RuntimeError("Resolve refused LinkProxyMedia")
-                journal.add({"kind": "proxy", "subject": action.subject, "path": p["path"],
-                             "target": p["target"]})
+                record({"kind": "proxy", "subject": action.subject, "path": p["path"],
+                        "target": p["target"]})
                 say(f"  linked proxy for {action.subject}")
 
             elif action.kind == "setting":
                 old = project.GetSetting(p["key"])
                 if not project.SetSetting(p["key"], p["value"]):
                     raise RuntimeError(f"SetSetting({p['key']}) refused")
-                journal.add({"kind": "setting", "subject": "project", "key": p["key"], "old": old})
+                record({"kind": "setting", "subject": "project", "key": p["key"], "old": old})
                 say(f"  {p['key']}: {old} -> {p['value']}")
 
             elif action.kind == "clip-setting":
@@ -327,8 +331,8 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 old = item.GetClipProperty(p["key"])
                 if not item.SetClipProperty(p["key"], p["value"]):
                     raise RuntimeError(f"SetClipProperty({p['key']}) refused")
-                journal.add({"kind": "clip-setting", "subject": action.subject, "path": p["path"],
-                             "key": p["key"], "old": old})
+                record({"kind": "clip-setting", "subject": action.subject, "path": p["path"],
+                        "key": p["key"], "old": old})
                 say(f"  {action.subject}: {p['key']} {old} -> {p['value']}")
 
             elif action.kind == "marker":
@@ -338,8 +342,8 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 if not timeline.AddMarker(p["frame"], p["color"], p["name"], p["note"],
                                           p["duration"], p["custom"]):
                     raise RuntimeError(_marker_refusal(timeline, p["frame"]))
-                journal.add({"kind": "marker", "subject": action.subject, "custom": p["custom"],
-                             "timeline": p["timeline"]})
+                record({"kind": "marker", "subject": action.subject, "custom": p["custom"],
+                        "timeline": p["timeline"]})
                 marked += 1
             else:
                 raise RuntimeError(f"unknown action kind {action.kind}")
@@ -354,9 +358,11 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
 def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None] | None = None) -> list[str]:
     """Reverse every journaled change, newest first. Returns problems (empty = clean).
 
-    Afterwards any RenderFlow marker still on the current timeline is removed
-    too: every one carries our tag, so they are ours even if the journal that
-    recorded them is gone.
+    Only changes made to the project that is open now are reversed; the rest
+    stay in the journal until that project is opened again. Afterwards any
+    RenderFlow marker still on the current timeline is removed too: every one
+    carries our tag, so they are ours even if the journal that recorded them
+    is gone.
     """
     journal = journal if journal is not None else Journal()
     project = resolve.GetProjectManager().GetCurrentProject()
@@ -364,8 +370,15 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
     say = progress or (lambda _m: None)
     remaining: list[dict[str, Any]] = []
     removed = gone = 0
+    name = _project_name(project)
+    elsewhere: dict[str, int] = {}
 
     for entry in reversed(journal.entries):
+        owner = entry.get("project")
+        if owner and owner != name:
+            elsewhere[owner] = elsewhere.get(owner, 0) + 1
+            remaining.append(entry)
+            continue
         try:
             kind = entry["kind"]
             if kind == "proxy":
@@ -399,12 +412,22 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
             remaining.append(entry)
     if removed or gone:
         say(f"  removed {removed} marker(s)" + (f" ({gone} already deleted by hand)" if gone else ""))
+    for owner, count in elsewhere.items():
+        problems.append(f"{count} change(s) were made to project {owner!r}, not {name!r} - "
+                        "open that project and run --undo again")
     journal.entries = list(reversed(remaining))
     journal.save()
     swept = sweep_markers(project)
     if swept:
         say(f"  removed {swept} leftover RenderFlow marker(s) the journal did not know about")
     return problems
+
+
+def _project_name(project) -> str:
+    try:
+        return str(project.GetName() or "")
+    except Exception:
+        return ""
 
 
 def sweep_markers(project) -> int:

@@ -123,8 +123,9 @@ Only what the measurements support:
 
 `fix` alone prints the plan and changes nothing. `fix --apply` writes a
 journal to `~/.renderflow/journal.json` as it goes; `fix --undo` walks it
-backwards, and also clears any RenderFlow marker still on the timeline even if
-the journal is gone (they are tagged). `--proxies all` forces proxies for every
+backwards for the project that is open (changes to another project wait until
+you open it), and also clears any RenderFlow marker still on the timeline even
+if the journal is gone (they are tagged). `--proxies all` forces proxies for every
 long-GOP clip; `--proxies none`, `--no-markers` and `--no-settings` narrow the
 plan; `--no-render` plans without the render measurement.
 
