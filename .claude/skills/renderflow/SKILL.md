@@ -18,8 +18,9 @@ plain language, and apply fixes only with the user's agreement.
    ```
    python -m renderflow.bridge
    ```
-   If it says no discovery file, ask the user to start the bridge. Do not try
-   to work around it.
+   If it says no discovery file, ask the user to start the bridge. If the menu
+   entry is missing, `python -m renderflow install-bridge` puts it there. Do
+   not try to work around the bridge.
 3. FFmpeg on PATH (`winget install Gyan.FFmpeg` on Windows). Without it the
    decode measurement is skipped and the report says so.
 
@@ -32,8 +33,9 @@ python -m renderflow report --json
 ```
 
 Runs everything: inventory, FFmpeg decode measurement per clip, a render-cost
-sample of every timeline clip through Resolve's own render queue (takes
-roughly 15-30 s per clip), and a plan of fixes. Nothing is changed. Read:
+sample of every timeline clip through Resolve's own render queue (roughly
+15-30 s per clip the first time; both measurements are cached, `--remeasure`
+ignores the caches), and a plan of fixes. Nothing is changed. Read:
 
 - `findings[]` - ranked `high` / `medium` / `info`, each with `code`,
   `subject` (a clip name, a timeline item as `name @V1 01:00:17:09`, or
@@ -41,9 +43,14 @@ roughly 15-30 s per clip), and a plan of fixes. Nothing is changed. Read:
 - `scan.clips[].measured` - decode fps and `realtime_ratio` (< 1 cannot play
   in real time; < 2 no headroom; >= 2 decode is not the problem).
 - `render.samples[]` - `ms_per_frame`, `realtime_ratio`, `export_share`,
-  `fusion_tools`, `color_nodes`; `render.estimated_export_s` for the whole
-  timeline.
+  `fusion_tools`, `color_nodes`, `from_cache`; `render.estimated_export_s`
+  for the whole timeline. A sample with `status: "Too short"` is a clip under
+  120 frames: not measured, because Resolve's per-job set-up time would make
+  it read as heavy. A fast-cut timeline can have nothing but these, and then
+  there are no render findings at all - say so rather than guessing.
 - `actions[]` - what `fix --apply` would do, with `estimate_s` for encodes.
+- `notes[]` - things about the plan that are not actions, e.g. findings that
+  could not get a marker because the frame already has one.
 - `skipped[]` - stages that did not run and why.
 
 For a quick look without rendering (seconds instead of minutes):
@@ -61,12 +68,17 @@ Fix kinds: proxies (DNxHR LB via FFmpeg, linked with `LinkProxyMedia`, plus
 Playback -> Proxy Handling -> Prefer Proxies, without which Resolve ignores
 them); settings (Render Cache -> Smart when a clip measured heavy and carries
 effects; Super Scale off); timeline markers over clips with high/medium
-findings. `--proxies all` forces proxies for every long-GOP clip;
-`--no-markers` / `--no-settings` narrow the plan.
+findings (red = high, yellow = medium, one per frame; a frame that already
+has the user's own marker is left alone). `--proxies all` forces proxies for
+every long-GOP clip; `--no-markers` / `--no-settings` narrow the plan;
+`--no-render` plans without the render measurement.
 
 Always show the user the plan and get a yes before `--apply`. Tell them
-`--undo` exists. Proxies take about a quarter of the footage's duration to
-encode and use disk space under `~/Videos/RenderFlow Proxies`.
+`--undo` exists: it reverses the journal for the project that is open, leaves
+any setting the user changed by hand since, and removes every RenderFlow
+marker on the timeline even if the journal is gone. Proxies take about a
+quarter of the footage's duration to encode and use disk space under
+`~/Videos/RenderFlow Proxies`.
 
 ## How to explain results
 

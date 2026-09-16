@@ -195,7 +195,7 @@ the free edition.
 
 ## Authors
 
-- (https://github.com/HudeiCS)
-- (https://github.com/yaebk)
+- [HudeiCS](https://github.com/HudeiCS)
+- [yaebk](https://github.com/yaebk)
 
 Pair-programmed on a shared machine; commits are under a single account.
