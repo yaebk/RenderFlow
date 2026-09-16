@@ -45,6 +45,7 @@ DEFAULT_SECONDS = 10.0          # long sample, in timeline seconds
 DEFAULT_SHORT_SECONDS = 2.0     # short sample; slope between the two cancels job set-up
 DEFAULT_BUDGET_S = 60.0         # cap on wall time per long sample
 MIN_LONG_FRAMES = 120           # below this the pipeline's parallelism hides the slope
+TOO_SHORT = "Too short"         # status of a clip under MIN_LONG_FRAMES: not measured at all
 SAMPLE_NAME = "renderflow_sample"
 PREFERRED = [("mov", "DNxHRLB"), ("mov", "DNxHRSQ"), ("mp4", "H264")]
 JOB_TIMEOUT_S = 900.0
@@ -73,6 +74,10 @@ class RenderSample:
     @property
     def ok(self) -> bool:
         return self.status == "Complete" and self.frames > 0 and self.render_ms > 0
+
+    @property
+    def too_short(self) -> bool:
+        return self.status == TOO_SHORT
 
     @property
     def two_point(self) -> bool:
@@ -145,13 +150,19 @@ class RenderProfile:
             if s.color_nodes > 1:
                 carries.append(f"{s.color_nodes} nodes")
             if not s.ok:
+                status = "too short to measure" if s.too_short else s.status
                 lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {'-':>9} {'-':>8} {'-':>6} "
-                             f"{'-':>7}  {s.status}")
+                             f"{'-':>7}  {status}")
                 continue
             share = self.shares.get(s.label, 0.0)
             lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {s.ms_per_frame:>9.1f} "
                          f"{s.render_fps:>7.1f}  {self.ratio(s):>5.2f}x {share:>6.0%}  "
                          f"{', '.join(carries)}")
+        short = sum(1 for s in self.samples if s.too_short)
+        if short:
+            lines.append("")
+            lines.append(f"{short} clip(s) under {MIN_LONG_FRAMES} frames not measured: Resolve's "
+                         "per-job set-up time hides the per-frame cost of anything that short.")
         if self.estimated_export_s:
             minutes, seconds = divmod(int(round(self.estimated_export_s)), 60)
             lines.append("")
@@ -319,7 +330,9 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     Each clip gets a short sample first, then a long one whose length is cut
     back if the short one predicts it would take more than ``budget_s`` of
     wall time (a heavy Fusion clip at seconds per frame). The slope between
-    the two cancels the fixed per-job cost.
+    the two cancels the fixed per-job cost. Clips shorter than
+    ``MIN_LONG_FRAMES`` are not rendered: a single sample of one would be
+    mostly set-up time and read as a heavy clip.
     """
     project = resolve.GetProjectManager().GetCurrentProject()
     if project is None:
@@ -332,9 +345,19 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     queue = queue or RenderQueue(resolve)
 
     samples: list[RenderSample] = []
+    short_clips = sum(1 for i in items if i["end"] - i["start"] < MIN_LONG_FRAMES)
+    if short_clips and progress:
+        progress(f"skipping {short_clips} clip(s) under {MIN_LONG_FRAMES} frames - too short to measure")
     with queue:
         for index, item in enumerate(items, 1):
             length = item["end"] - item["start"]
+            if length < MIN_LONG_FRAMES:
+                samples.append(RenderSample(
+                    item=item["name"], track=item["track"], start=item["start"], end=item["end"],
+                    sample_start=item["start"], frames=0, render_ms=0.0, status=TOO_SHORT,
+                    fusion_tools=item["fusion_tools"], color_nodes=item["color_nodes"],
+                    label=_label(item, fps)))
+                continue
             n, n_short = sample_sizes(length, fps, seconds, short_seconds)
             short_ms, ms, status = 0.0, 0.0, "Failed"
             try:
@@ -428,6 +451,8 @@ def render_findings(profile: RenderProfile) -> list[Finding]:
     out: list[Finding] = []
     good = [s for s in profile.samples if s.ok]
     for s in profile.samples:
+        if s.too_short:
+            continue
         if not s.ok:
             out.append(Finding("medium", "render-sample-failed", s.label,
                                f"sample render did not complete ({s.status})",

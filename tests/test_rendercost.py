@@ -296,13 +296,20 @@ def test_long_sample_is_cut_back_for_a_heavy_clip(tmp_path):
     assert s.short_frames == 30 and 120 <= s.frames < 600            # budget-limited
 
 
-def test_render_cost_short_clip_uses_its_whole_length_and_one_sample(tmp_path):
-    resolve, _ = make([[FakeItem("blip", 0, 5, 2.0)]])
-    rc = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
-    s = rc.samples[0]
-    assert s.frames == 5 and s.sample_start == 0
-    assert s.short_frames == 0 and not s.two_point             # too short for two samples
-    assert s.ms_per_frame == (400 + 5 * 2.0) / 5               # overhead stays in, honestly
+def test_render_cost_does_not_measure_clips_under_the_slope_floor(tmp_path):
+    # A 5-frame job is almost all set-up time: (400 + 5 * 2) / 5 = 82 ms/frame for a 2 ms
+    # clip. Rather than report that as heavy, the clip is skipped and says so.
+    resolve, project = make([[FakeItem("blip", 0, 5, 2.0), FakeItem("long", 5, 6005, 2.0)]])
+    log = []
+    rc = render_cost(resolve, progress=log.append, queue=RenderQueue(resolve, target_dir=str(tmp_path)))
+    blip, long = rc.samples
+    assert blip.too_short and not blip.ok and blip.frames == 0
+    assert long.ok and round(long.ms_per_frame) == 2
+    assert len(project.deleted) == 2                             # only the long clip was rendered
+    assert log[0] == "skipping 1 clip(s) under 120 frames - too short to measure"
+    assert rc.total_frames == 6000                               # not in the export estimate
+    assert "too short to measure" in rc.text() and "1 clip(s) under 120 frames" in rc.text()
+    assert [f.subject for f in render_findings(rc)] == []        # no finding, not a failure either
 
 
 def test_render_cost_can_skip_the_short_sample(tmp_path):

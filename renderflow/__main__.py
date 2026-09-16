@@ -152,7 +152,10 @@ def main(argv=None) -> int:
             else:
                 print(rc.text())
                 print()
-                print(findings_text(findings, "no findings - every clip renders at or above real time."))
+                empty = ("no findings - every measured clip renders at or above real time."
+                         if any(s.ok for s in rc.samples)
+                         else "no findings - nothing on this timeline was long enough to measure.")
+                print(findings_text(findings, empty))
             return 0
 
         report = scan(resolve)

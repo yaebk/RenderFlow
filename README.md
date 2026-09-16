@@ -82,7 +82,9 @@ per file in `~/.renderflow/measurements.json`.
 a Fusion comp. So RenderFlow renders a short and a long sample of each timeline
 clip through Resolve's own render queue and takes the slope between them,
 which removes the fixed per-job overhead and gives true milliseconds per frame
-for the whole pipeline. It reports each clip's render speed against real time,
+for the whole pipeline. Clips under 120 frames are not measured: below that
+Resolve's per-job set-up time swamps the per-frame cost, and a single sample
+would read as a heavy clip. It reports each clip's render speed against real time,
 how many times heavier it is than the cheapest clip, its share of total export
 time, and an estimated export time for the timeline. It uses the cheapest
 encoder available (DNxHR LB), deletes the sample jobs and files, and restores
