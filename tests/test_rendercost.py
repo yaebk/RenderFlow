@@ -6,7 +6,9 @@ import os
 
 import pytest
 
+from renderflow import rendercost
 from renderflow.rendercost import (
+    RenderCache,
     RenderProfile,
     RenderQueue,
     RenderSample,
@@ -18,6 +20,11 @@ from renderflow.rendercost import (
     render_findings,
     sample_sizes,
 )
+
+
+@pytest.fixture(autouse=True)
+def _cache_in_tmp(tmp_path, monkeypatch):
+    monkeypatch.setattr(rendercost, "RENDER_CACHE_PATH", tmp_path / "render.json")
 
 
 # ------------------------------------------------------------------ fakes
@@ -343,6 +350,44 @@ def test_failed_sample_is_recorded_not_raised(tmp_path):
     assert rc.total_frames == 1000                                 # failed clip not estimated
     codes = [f.code for f in render_findings(rc)]
     assert "render-sample-failed" in codes
+
+
+# ----------------------------------------------------------------- cache
+def test_render_cost_reuses_cached_samples_and_keys_on_what_matters(tmp_path):
+    v1 = [FakeItem("plain", 0, 6000, 10.0), FakeItem("blip", 6000, 6010, 1.0)]
+    resolve, project = make([v1])
+    rc = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path / "a")))
+    assert not rc.samples[0].from_cache and rc.samples[0].measured_at > 0
+    assert (tmp_path / "render.json").exists()
+    rendered = len(project.deleted)
+
+    # same timeline again: nothing rendered, the number is the same, and the text says so
+    resolve, project = make([v1])
+    log = []
+    rc2 = render_cost(resolve, progress=log.append, queue=RenderQueue(resolve, target_dir=str(tmp_path / "b")))
+    assert project.deleted == [] and rc2.samples[0].from_cache
+    assert round(rc2.samples[0].ms_per_frame) == 10 and rc2.samples[1].too_short
+    assert "1 sample(s) reused from an earlier run" in rc2.text()
+    assert any(l.endswith("plain - cached") for l in log)
+    assert rc2.to_dict()["samples"][0]["from_cache"] is True
+
+    # a Fusion tool added to the clip changes the key -> rendered again
+    resolve, project = make([[FakeItem("plain", 0, 6000, 10.0, comps=[FakeComp("Blur")])]])
+    rc3 = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path / "c")))
+    assert not rc3.samples[0].from_cache and len(project.deleted) == rendered
+
+    # --remeasure: an in-memory cache renders again and writes nothing
+    resolve, project = make([v1])
+    rc4 = render_cost(resolve, cache=RenderCache(None), queue=RenderQueue(resolve, target_dir=str(tmp_path / "d")))
+    assert not rc4.samples[0].from_cache and len(project.deleted) == rendered
+
+
+def test_render_cache_ignores_failed_samples_and_bad_files(tmp_path):
+    cache = RenderCache(tmp_path / "r.json")
+    cache.put("k", RenderSample("x", 1, 0, 600, 0, 600, 0.0, "Failed"))
+    assert cache.get("k") is None and not (tmp_path / "r.json").exists()
+    (tmp_path / "r.json").write_text("{not json")
+    assert RenderCache(tmp_path / "r.json").data == {}
 
 
 # -------------------------------------------------------------- findings

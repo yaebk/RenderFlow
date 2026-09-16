@@ -28,15 +28,25 @@ playhead, and changes the current render format and range. All of that is
 put back when the run ends, the sample job is deleted from the queue, and
 the output files are removed. Any render jobs already in the queue are left
 alone. It refuses to start if a render is already in progress.
+
+Results are cached in ~/.renderflow/render.json, keyed by everything that
+should change the number: the item (source file, position, length, Fusion
+tools, grade node count), the timeline's format, the sample codec and lengths,
+and the CPU. A parameter tweak inside an effect does not change the key, so
+``--remeasure`` forces a fresh run.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import platform
 import shutil
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from renderflow.scan import Finding, _fusion_tools, _int, _node_count, item_label, sort_findings
@@ -47,6 +57,8 @@ DEFAULT_BUDGET_S = 60.0         # cap on wall time per long sample
 MIN_LONG_FRAMES = 120           # below this the pipeline's parallelism hides the slope
 TOO_SHORT = "Too short"         # status of a clip under MIN_LONG_FRAMES: not measured at all
 SAMPLE_NAME = "renderflow_sample"
+RENDER_CACHE_PATH = Path.home() / ".renderflow" / "render.json"
+RENDER_CACHE_VERSION = 1
 PREFERRED = [("mov", "DNxHRLB"), ("mov", "DNxHRSQ"), ("mp4", "H264")]
 JOB_TIMEOUT_S = 900.0
 
@@ -66,6 +78,8 @@ class RenderSample:
     short_frames: int = 0       # second, shorter sample used to cancel per-job overhead
     short_ms: float = 0.0
     label: str = ""             # unique identity: "<name> @V<track> <timecode>"
+    measured_at: float = 0.0    # time.time() of the render
+    from_cache: bool = False    # reused from an earlier run
 
     def __post_init__(self) -> None:
         if not self.label:
@@ -158,6 +172,12 @@ class RenderProfile:
             lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {s.ms_per_frame:>9.1f} "
                          f"{s.render_fps:>7.1f}  {self.ratio(s):>5.2f}x {share:>6.0%}  "
                          f"{', '.join(carries)}")
+        cached = [s for s in self.samples if s.from_cache]
+        if cached:
+            oldest = min(s.measured_at for s in cached)
+            lines.append("")
+            lines.append(f"{len(cached)} sample(s) reused from an earlier run ({_age(oldest)} ago); "
+                         "--remeasure renders them again.")
         short = sum(1 for s in self.samples if s.too_short)
         if short:
             lines.append("")
@@ -170,6 +190,60 @@ class RenderProfile:
                          f"{minutes}m {seconds:02d}s for {self.total_frames} frames "
                          f"({self.total_frames / self.fps:.0f}s of video)")
         return "\n".join(lines)
+
+
+def _age(when: float) -> str:
+    seconds = max(0.0, time.time() - when)
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} min"
+    if seconds < 86400:
+        return f"{seconds / 3600:.0f} h"
+    return f"{seconds / 86400:.0f} days"
+
+
+# ------------------------------------------------------------------ cache
+class RenderCache:
+    """Completed samples from earlier runs. ``RenderCache(None)`` keeps nothing on disk."""
+
+    def __init__(self, path: Path | str | None):
+        self.path = Path(path) if path else None
+        self.data: dict[str, dict] = {}
+        if self.path and self.path.exists():
+            try:
+                loaded = json.loads(self.path.read_text("utf-8"))
+                if loaded.get("version") == RENDER_CACHE_VERSION:
+                    self.data = loaded.get("entries", {})
+            except (OSError, ValueError):
+                self.data = {}
+
+    def get(self, key: str) -> RenderSample | None:
+        raw = self.data.get(key)
+        if not raw:
+            return None
+        try:
+            sample = RenderSample(**raw)
+        except TypeError:
+            return None
+        sample.from_cache = True
+        return sample
+
+    def put(self, key: str, sample: RenderSample) -> None:
+        if not sample.ok:
+            return
+        self.data[key] = {**asdict(sample), "from_cache": False}
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps({"version": RENDER_CACHE_VERSION, "entries": self.data},
+                                            indent=1), "utf-8")
+
+
+def _render_key(item: dict, timeline_fp: str, seconds: float, short_seconds: float) -> str:
+    raw = "|".join([
+        item.get("path", ""), item["name"], str(item["track"]), str(item["start"]), str(item["end"]),
+        ",".join(item["fusion_tools"]), str(item["color_nodes"]),
+        timeline_fp, f"{seconds:g}", f"{short_seconds:g}", platform.processor(),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 # ------------------------------------------------------------ the queue
@@ -296,8 +370,17 @@ def timeline_items(timeline) -> list[dict[str, Any]]:
             items.append({
                 "name": str(item.GetName()), "track": track, "start": start, "end": end,
                 "fusion_tools": _fusion_tools(item), "color_nodes": _node_count(item),
+                "path": _media_path(item),
             })
     return items
+
+
+def _media_path(item) -> str:
+    try:
+        media = item.GetMediaPoolItem()
+        return str(media.GetClipProperty("File Path") or "") if media is not None else ""
+    except Exception:
+        return ""
 
 
 def _label(item: dict, fps: float) -> str:
@@ -324,7 +407,7 @@ def sample_sizes(length: int, fps: float, seconds: float, short_seconds: float,
 
 def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float = DEFAULT_SHORT_SECONDS,
                 budget_s: float = DEFAULT_BUDGET_S, progress: Callable[[str], None] | None = None,
-                queue: RenderQueue | None = None) -> RenderProfile:
+                queue: RenderQueue | None = None, cache: RenderCache | None = None) -> RenderProfile:
     """Sample every clip on the current timeline and return a :class:`RenderProfile`.
 
     Each clip gets a short sample first, then a long one whose length is cut
@@ -332,7 +415,8 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     wall time (a heavy Fusion clip at seconds per frame). The slope between
     the two cancels the fixed per-job cost. Clips shorter than
     ``MIN_LONG_FRAMES`` are not rendered: a single sample of one would be
-    mostly set-up time and read as a heavy clip.
+    mostly set-up time and read as a heavy clip. Samples already in ``cache``
+    (default: the on-disk one) are reused instead of rendered.
     """
     project = resolve.GetProjectManager().GetCurrentProject()
     if project is None:
@@ -343,6 +427,10 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     fps = float(timeline.GetSetting("timelineFrameRate") or 0) or 24.0
     items = timeline_items(timeline)
     queue = queue or RenderQueue(resolve)
+    cache = cache if cache is not None else RenderCache(RENDER_CACHE_PATH)
+    timeline_fp = "|".join(str(timeline.GetSetting(k) or "") for k in
+                           ("timelineFrameRate", "timelineResolutionWidth", "timelineResolutionHeight"))
+    timeline_fp += f"|{queue.format}/{queue.codec}"
 
     samples: list[RenderSample] = []
     short_clips = sum(1 for i in items if i["end"] - i["start"] < MIN_LONG_FRAMES)
@@ -357,6 +445,13 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                     sample_start=item["start"], frames=0, render_ms=0.0, status=TOO_SHORT,
                     fusion_tools=item["fusion_tools"], color_nodes=item["color_nodes"],
                     label=_label(item, fps)))
+                continue
+            key = _render_key(item, timeline_fp, seconds, short_seconds)
+            cached = cache.get(key)
+            if cached is not None:
+                if progress:
+                    progress(f"sample {index}/{len(items)}: {item['name']} - cached")
+                samples.append(cached)
                 continue
             n, n_short = sample_sizes(length, fps, seconds, short_seconds)
             short_ms, ms, status = 0.0, 0.0, "Failed"
@@ -383,12 +478,15 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                 sample_start = item["start"]
             if n_short >= n:
                 n_short, short_ms = 0, 0.0
-            samples.append(RenderSample(
+            sample = RenderSample(
                 item=item["name"], track=item["track"], start=item["start"], end=item["end"],
                 sample_start=sample_start, frames=n, render_ms=ms, status=status,
                 fusion_tools=item["fusion_tools"], color_nodes=item["color_nodes"],
                 short_frames=n_short, short_ms=short_ms, label=_label(item, fps),
-            ))
+                measured_at=time.time(),
+            )
+            cache.put(key, sample)
+            samples.append(sample)
 
     profile = RenderProfile(str(timeline.GetName()), fps, queue.format, queue.codec, samples)
     estimate_export(profile)

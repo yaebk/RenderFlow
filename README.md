@@ -95,7 +95,9 @@ how many times heavier it is than the cheapest clip, its share of total export
 time, and an estimated export time for the timeline. It uses the cheapest
 encoder available (DNxHR LB), deletes the sample jobs and files, and restores
 the render format, page, playhead and range afterwards. Existing queue jobs
-are not touched.
+are not touched. Samples are cached in `~/.renderflow/render.json` so that
+`report` followed by `fix` does not render everything twice; `--remeasure`
+forces a fresh run, which you want after changing an effect's settings.
 
 ## What it fixes
 

@@ -33,6 +33,7 @@ from renderflow.rendercost import (
     DEFAULT_BUDGET_S,
     DEFAULT_SECONDS,
     DEFAULT_SHORT_SECONDS,
+    RenderCache,
     render_cost,
     render_findings,
 )
@@ -58,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="short sample that cancels per-job set-up, 0 to skip (default %(default)s)")
         p.add_argument("--budget", type=float, default=DEFAULT_BUDGET_S,
                        help="max wall seconds per long sample (default %(default)s)")
+        p.add_argument("--remeasure", action="store_true",
+                       help="render every sample again instead of reusing earlier results")
 
     p_rep = sub.add_parser("report", help="scan, measure decode and render cost, plan fixes")
     p_rep.add_argument("--json", action="store_true", help="machine-readable output")
@@ -89,7 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="random-access seeks to time per clip, 0 to skip (default %(default)s)")
     p_prof.add_argument("--hwaccel", default=None,
                         help="also try a hardware decoder, e.g. d3d11va or cuda (what Studio would use)")
-    p_prof.add_argument("--no-cache", action="store_true", help="re-measure even if cached")
+    p_prof.add_argument("--remeasure", action="store_true",
+                        help="measure every clip again instead of reusing earlier results")
 
     p_rc = sub.add_parser("render-cost", help="render a sample of every timeline clip and time it")
     p_rc.add_argument("--json", action="store_true", help="machine-readable output")
@@ -117,6 +121,8 @@ def main(argv=None) -> int:
     if hasattr(args, "seconds"):
         render_kw = {"seconds": args.seconds, "short_seconds": args.short_seconds,
                      "budget_s": args.budget}
+        if args.remeasure:
+            render_kw["cache"] = RenderCache(None)
     try:
         resolve = connect(prefer=args.prefer, timeout=1200)
 
@@ -178,7 +184,7 @@ def main(argv=None) -> int:
         report = scan(resolve)
         results = {}
         if args.command == "profile":
-            cache = MeasurementCache(None) if args.no_cache else None
+            cache = MeasurementCache(None) if args.remeasure else None
             results = profile(report, sample_s=args.sample, seeks=args.seeks,
                               hwaccel=args.hwaccel, cache=cache, progress=_stderr)
         if args.json:
