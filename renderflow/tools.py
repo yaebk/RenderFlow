@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from renderflow.rendercost import RenderProfile, RenderQueue, RenderSample
-from renderflow.scan import FUSION_PASSTHROUGH, Finding, _int, item_label, sort_findings
+from renderflow.scan import FUSION_PASSTHROUGH, Finding, _int, item_label, sort_findings, timeline_named
 
 BYPASSED_PATH = Path.home() / ".renderflow" / "bypassed.json"
 PASS_THROUGH = "TOOLB_PassThrough"
@@ -70,7 +70,7 @@ class CompCost:
     frames: int                 # sample length rendered
     ms_per_frame: float         # with everything on, job set-up removed
     tools: list[ToolCost] = field(default_factory=list)
-    copies: list[str] = field(default_factory=list)     # other items with the identical comp
+    copies: list[dict[str, Any]] = field(default_factory=list)  # items with the identical comp: label, track, start
     status: str = "Complete"
 
     @property
@@ -92,6 +92,10 @@ class ToolReport:
     fps: float
     comps: list[CompCost]
     problems: list[str] = field(default_factory=list)   # anything not put back - must be empty
+
+    @property
+    def frame_ms(self) -> float:
+        return 1000.0 / self.fps if self.fps else 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -168,20 +172,20 @@ def _same(a: dict, b: dict) -> bool:
     return all(a.get(k) == b.get(k) for k in keys)
 
 
-def _passing(tool) -> bool:
+def is_passing(tool) -> bool:
     try:
         return bool((tool.GetAttrs() or {}).get(PASS_THROUGH))
     except Exception:
         return False
 
 
-def _set_pass(tool, value: bool) -> bool:
+def set_passing(tool, value: bool) -> bool:
     """Set the flag and confirm by reading it back."""
     try:
         tool.SetAttrs({PASS_THROUGH: bool(value)})
     except Exception:
         return False
-    return _passing(tool) == bool(value)
+    return is_passing(tool) == bool(value)
 
 
 def restore_bypassed(project, record: Bypassed | None = None) -> list[str]:
@@ -189,19 +193,18 @@ def restore_bypassed(project, record: Bypassed | None = None) -> list[str]:
     record = record if record is not None else Bypassed()
     fixed: list[str] = []
     for entry in list(record.entries):
-        tool = _find_tool(project, entry)
+        timeline = timeline_named(project, entry.get("timeline", ""))
+        tool = find_tool(timeline, entry) if timeline is not None else None
         if tool is None:
             continue                                # timeline or item gone; keep the record
-        if not _passing(tool) or _set_pass(tool, False):
+        if not is_passing(tool) or set_passing(tool, False):
             fixed.append(f"{entry['tool']} on {entry['label']}")
             record.remove(entry)
     return fixed
 
 
-def _find_tool(project, entry: dict):
-    timeline = project.GetCurrentTimeline()
-    if timeline is None or str(timeline.GetName()) != entry.get("timeline"):
-        return None
+def find_tool(timeline, entry: dict):
+    """The tool an entry (track, start, comp, tool name) points at, or None."""
     for item in timeline.GetItemListInTrack("video", entry["track"]) or []:
         if _int(item.GetStart()) != entry["start"]:
             continue
@@ -285,7 +288,7 @@ def attribute(resolve, profile: RenderProfile, frames: int = DEFAULT_FRAMES,
                     continue
                 sig = _signature(tools)
                 if sig in seen:
-                    seen[sig].copies.append(label)
+                    seen[sig].copies.append({"label": label, "track": track, "start": key[1]})
                     continue
                 cost = CompCost(label, track, key[1], _int(item.GetEnd()), index, 0, 0.0)
                 seen[sig] = cost
@@ -317,18 +320,18 @@ def attribute(resolve, profile: RenderProfile, frames: int = DEFAULT_FRAMES,
                 continue
             cost.ms_per_frame = max(0.0, base - overhead) / n
             for name, kind, tool in tools:
-                if _passing(tool):
+                if is_passing(tool):
                     continue                        # the editor's own bypass: leave it, measure nothing
                 entry = {"timeline": report.timeline, "label": cost.label, "track": cost.track,
                          "start": cost.start, "comp": cost.comp, "tool": name}
                 record.add(entry)                   # on disk before the flag flips
-                if not _set_pass(tool, True):
+                if not set_passing(tool, True):
                     record.remove(entry)
                     continue
                 try:
                     ms, status = queue.render_range(a, b)
                 finally:
-                    if _set_pass(tool, False):
+                    if set_passing(tool, False):
                         record.remove(entry)
                     else:
                         report.problems.append(f"{name} ({kind}) on {cost.label} may still be bypassed")
@@ -344,16 +347,21 @@ def _overhead(profile: RenderProfile) -> float:
 
 
 # --------------------------------------------------------------- findings
+def heavy_tools(c: CompCost, frame_ms: float) -> list[ToolCost]:
+    """The tools whose saving is a result, costliest first: the comp renders below
+    real time, and the saving is outside the job clock's noise (two steps) and
+    at least half a frame."""
+    if not c.ok or c.ms_per_frame < frame_ms:
+        return []
+    return [t for t in c.measured if t.saved_ms_per_frame >= max(2 * c.step_ms, frame_ms * 0.5)]
+
+
 def tool_findings(report: ToolReport, fps: float | None = None) -> list[Finding]:
     """One finding per measured comp naming the tools that cost the most."""
-    fps = fps or report.fps
-    frame_ms = 1000.0 / fps if fps else 0.0
+    frame_ms = 1000.0 / fps if fps else report.frame_ms
     out: list[Finding] = []
     for c in report.comps:
-        if not c.ok or c.ms_per_frame < frame_ms:          # renders in real time: nothing to blame
-            continue
-        # A saving inside the job clock's noise (two steps) or under half a frame is not a result.
-        big = [t for t in c.measured if t.saved_ms_per_frame >= max(2 * c.step_ms, frame_ms * 0.5)]
+        big = heavy_tools(c, frame_ms)
         if not big:
             continue
         top = ", ".join(f"{t.name} ({t.kind}, ~{t.saved_ms_per_frame:.0f} ms/frame)" for t in big[:3])
@@ -362,7 +370,8 @@ def tool_findings(report: ToolReport, fps: float | None = None) -> list[Finding]
             "high" if c.ms_per_frame > frame_ms * 2 else "medium", "fusion-tool-heavy", c.label,
             f"{c.ms_per_frame:.0f} ms/frame; the cost is mostly {top}",
             "Measured by bypassing each tool in turn and rendering the same frames again. "
-            "Bypass the heavy ones while editing (the node's pass-through switch) and re-enable "
-            "them for delivery, or bake this clip once it is final. Noise generators (Grain, "
-            "FastNoise) and blurs cost the same every frame and cache well." + copies))
+            "fix --tools can bypass the heavy ones while you edit (the node's pass-through "
+            "switch, journaled; fix --restore-tools puts them back for delivery). Noise "
+            "generators (Grain, FastNoise) and blurs cost the same every frame and cache "
+            "well." + copies))
     return sort_findings(out)

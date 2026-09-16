@@ -5,6 +5,8 @@
     python -m renderflow fix                # show the planned fixes (nothing changes)
     python -m renderflow fix --apply        # make them, journaled
     python -m renderflow fix --undo         # reverse everything from the journal
+    python -m renderflow fix --tools        # also measure Fusion tools and plan bypassing the costly ones
+    python -m renderflow fix --restore-tools  # re-enable the bypassed tools (before delivery), keep the rest
 
     python -m renderflow scan               # inventory + rule-of-thumb findings only
     python -m renderflow profile            # scan + decode speed of every clip
@@ -21,7 +23,7 @@ from dataclasses import asdict
 
 from renderflow.bridge.client import BridgeUnavailable, RemoteError, connect
 from renderflow.bridge.install import install as install_bridge
-from renderflow.fix import Journal, apply, plan_text, undo
+from renderflow.fix import Journal, apply, bypassed_findings, plan_text, project_name, undo
 from renderflow.profile import (
     DEFAULT_SAMPLE_S,
     DEFAULT_SEEKS,
@@ -39,7 +41,7 @@ from renderflow.rendercost import (
     render_findings,
 )
 from renderflow.report import full_report
-from renderflow.scan import findings_text, scan
+from renderflow.scan import findings_text, scan, sort_findings
 from renderflow.tools import attribute, restore_bypassed, tool_findings
 
 
@@ -78,11 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
     group = p_fix.add_mutually_exclusive_group()
     group.add_argument("--apply", action="store_true", help="make the planned changes")
     group.add_argument("--undo", action="store_true", help="reverse every journaled change")
+    group.add_argument("--restore-tools", action="store_true",
+                       help="re-enable the Fusion tools bypassed for editing, keep every other fix")
     p_fix.add_argument("--proxies", choices=["auto", "all", "none"], default="auto")
     p_fix.add_argument("--no-markers", action="store_true")
     p_fix.add_argument("--no-settings", action="store_true")
     p_fix.add_argument("--no-render", action="store_true",
                        help="plan without render-cost measurement (faster; no Smart-cache decision)")
+    p_fix.add_argument("--tools", action="store_true",
+                       help="also measure which Fusion tool costs what on clips that render heavy, "
+                            "and plan bypassing the costly ones while editing (slow)")
+    p_fix.add_argument("--no-bypass", action="store_true", help="measure tools but do not plan bypassing any")
     render_args(p_fix)
 
     p_scan = sub.add_parser("scan", help="inventory the open project and report likely bottlenecks")
@@ -146,21 +154,24 @@ def main(argv=None) -> int:
             return 0
 
         if args.command == "fix":
-            if args.undo:
+            if args.undo or args.restore_tools:
                 journal = Journal()
-                print(f"undoing {len(journal)} change(s) ..." if journal.entries
-                      else "the journal is empty - checking the timeline for leftover markers ...")
-                problems = undo(resolve, journal, progress=print)
+                kinds = {"tool-bypass"} if args.restore_tools else None
+                count = len([e for e in journal.entries if kinds is None or e.get("kind") in kinds])
+                print(f"undoing {count} change(s) ..." if count
+                      else "nothing of that kind in the journal - checking the timeline for leftovers ...")
+                problems = undo(resolve, journal, progress=print, kinds=kinds)
                 fixed = restore_bypassed(resolve.GetProjectManager().GetCurrentProject())
                 if fixed:
                     print(f"  re-enabled {len(fixed)} Fusion tool(s) an interrupted run left bypassed")
                 print("done." if not problems else f"{len(problems)} problem(s): " + "; ".join(problems))
                 return 1 if problems else 0
             report = full_report(resolve, decode=True, render=not args.no_render,
-                                 proxies=args.proxies, progress=_stderr, **render_kw)
+                                 proxies=args.proxies, tools=args.tools, progress=_stderr, **render_kw)
             actions = [a for a in report.actions
                        if not (args.no_markers and a.kind == "marker")
-                       and not (args.no_settings and a.kind in ("setting", "clip-setting"))]
+                       and not (args.no_settings and a.kind in ("setting", "clip-setting"))
+                       and not (args.no_bypass and a.kind == "tool-bypass")]
             print(plan_text(actions, report.notes))
             if not actions:
                 return 0
@@ -194,7 +205,8 @@ def main(argv=None) -> int:
         if args.command == "tools":
             rc = render_cost(resolve, progress=_stderr, **render_kw)
             tr = attribute(resolve, rc, progress=_stderr)
-            findings = tool_findings(tr)
+            project = resolve.GetProjectManager().GetCurrentProject()
+            findings = sort_findings(tool_findings(tr) + bypassed_findings(project_name(project)))
             if args.json:
                 data = tr.to_dict()
                 data["findings"] = [asdict(f) for f in findings]
@@ -207,6 +219,7 @@ def main(argv=None) -> int:
             return 1 if tr.problems else 0
 
         report = scan(resolve)
+        report.findings = sort_findings(report.findings + bypassed_findings(report.project))
         results = {}
         if args.command == "profile":
             cache = MeasurementCache(None) if args.remeasure else None

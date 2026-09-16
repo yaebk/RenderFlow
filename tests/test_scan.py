@@ -29,11 +29,11 @@ def props(**over):
 
 
 class FakeTool:
-    def __init__(self, reg_id):
-        self.reg_id = reg_id
+    def __init__(self, reg_id, bypassed=False):
+        self.reg_id, self.bypassed = reg_id, bypassed
 
     def GetAttrs(self):
-        return {"TOOLS_RegID": self.reg_id}
+        return {"TOOLS_RegID": self.reg_id, "TOOLB_PassThrough": self.bypassed}
 
 
 class FakeComp:
@@ -237,6 +237,14 @@ def test_default_fusion_comp_is_not_an_effect_but_real_tools_are():
     by_code = {f.code: f for f in report.findings}
     assert "fusion-comp" in by_code and "render-cache-off" in by_code
     assert by_code["fusion-comp"].subject == "cam.mp4 @V1 01:00:00:00"
+
+
+def test_a_bypassed_fusion_tool_renders_nothing_and_counts_for_nothing():
+    comp = FakeComp("MediaIn", "Blur", "Glow", "MediaOut")
+    comp.tools[3].bypassed = True
+    resolve = make_resolve([(props(), [comp], 1)])
+    report = scan(resolve, platform="win32", **ALL_EXIST)
+    assert report.clips[0].fusion_tools == ["Blur"]
 
 
 def test_scan_without_timeline():

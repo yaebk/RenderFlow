@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from renderflow.fix import Action, plan, plan_text
+from renderflow.fix import Action, bypassed_findings, plan, plan_text
 from renderflow.profile import DecodeMeasure, FFmpegMissing, measured_text, profile
 from renderflow.rendercost import RenderProfile, apply_render_measurements, render_cost, render_findings
 from renderflow.scan import Finding, ScanReport, findings_text, scan, sort_findings
@@ -95,7 +95,11 @@ def full_report(resolve, decode: bool = True, render: bool = True, proxies: str 
             report.skipped.append(f"Fusion tool attribution ({exc})")
     elif tools:
         report.skipped.append("Fusion tool attribution (needs the render measurement)")
-    report.findings = sort_findings(findings)
+    bypassed = bypassed_findings(scan_report.project)
+    report.findings = sort_findings(findings + bypassed)
     report.actions = plan(scan_report, report.render, report.findings, proxies=proxies,
-                          notes=report.notes)
+                          notes=report.notes, tools=report.tools)
+    if bypassed:
+        report.notes.append(f"{len(bypassed)} clip(s) have Fusion tools bypassed by an earlier apply - "
+                            "re-enable before delivery:  python -m renderflow fix --restore-tools")
     return report

@@ -7,9 +7,13 @@ import subprocess
 
 import pytest
 
-from renderflow.fix import Action, Journal, apply, plan, plan_text, undo
+from test_tools import CostlyComp, CostlyTool, all_active
+
+from renderflow import fix as fix_mod
+from renderflow.fix import Action, Journal, apply, bypassed_findings, plan, plan_text, undo
 from renderflow.rendercost import RenderProfile, RenderSample
 from renderflow.report import full_report
+from renderflow.tools import CompCost, ToolCost, ToolReport
 from renderflow.scan import (
     Finding,
     ProjectSettings,
@@ -19,6 +23,11 @@ from renderflow.scan import (
     find_issues,
     item_label,
 )
+
+
+@pytest.fixture(autouse=True)
+def _journal_in_tmp(tmp_path, monkeypatch):
+    monkeypatch.setattr(fix_mod, "JOURNAL_PATH", tmp_path / "default-journal.json")
 
 
 # ------------------------------------------------------------------ data
@@ -67,6 +76,17 @@ def render_profile(*samples, fps=60.0):
 def sample(name, ms, start=216000, end=216600, **kw):
     return RenderSample(name, 1, start, end, start, 600, ms * 600, "Complete",
                         label=item_label(name, 1, start, 60.0), **kw)
+
+
+def tool_report(*comps, fps=60.0):
+    return ToolReport("Timeline 1", fps, list(comps))
+
+
+def heavy_comp_cost(label="Adjustment Clip @V4 01:00:01:28", copies=()):
+    return CompCost(label, 4, 216088, 216688, 1, 90, 197.0,
+                    [ToolCost("BitmapMask1", "BitmapMask", 32.0), ToolCost("Grain1", "Grain", 64.0),
+                     ToolCost("ColorCurves1", "ColorCurves", 4.0), ToolCost("Text1", "TextPlus", 0.0, "Failed")],
+                    list(copies))
 
 
 # ------------------------------------------------------------------ plan
@@ -122,6 +142,31 @@ def test_plan_smart_cache_only_for_heavy_effect_clips():
     assert len(actions) == 1 and actions[0].params["key"] == "perfRenderCacheMode"
     assert "fx.mp4" in actions[0].why and "plain" not in actions[0].why
     assert plan(report(clip("fx.mp4"), render_cache_mode="smart"), rp, markers=False) == []
+
+
+def test_plan_bypasses_the_measured_tools_of_heavy_comps_only():
+    copy = {"label": "Adjustment Clip @V4 01:00:02:29", "track": 4, "start": 216149}
+    fast = CompCost("cheap @V1 01:00:00:00", 1, 216000, 216600, 1, 90, 9.0, [ToolCost("Blur1", "Blur", 30.0)])
+    tr = tool_report(heavy_comp_cost(copies=[copy]), fast)
+    actions = plan(report(clip()), tools=tr, markers=False)
+    (a,) = actions
+    assert a.kind == "tool-bypass" and a.subject == "Adjustment Clip @V4 01:00:01:28 (+1 more)"
+    assert a.params["tools"] == ["Grain1", "BitmapMask1"]                # ranked; curves under threshold
+    assert a.params["items"] == [{"label": "Adjustment Clip @V4 01:00:01:28", "track": 4, "start": 216088}, copy]
+    assert a.params["timeline"] == "Timeline 1" and a.params["comp"] == 1
+    assert str(a).startswith("[tool-bypass] Adjustment Clip @V4 01:00:01:28 (+1 more): "
+                             "bypass Grain1, BitmapMask1 while editing\n")
+    assert ("these cost ~96 of the comp's 197 ms/frame; ~101 ms/frame is left, still over real time (17): "
+            "Text1 (TextPlus) cannot be bypassed") in a.why and "--restore-tools" in a.why
+    assert plan(report(clip()), tools=tool_report(), markers=False) == []
+
+    # only as many tools as it takes: 60 ms/frame at 30 fps needs one of the three
+    c = CompCost("fx @V1 01:00:00:00", 1, 216000, 216600, 1, 90, 60.0,
+                 [ToolCost("Blur1", "Blur", 20.0), ToolCost("ugly_2", "FastNoise", 40.0),
+                  ToolCost("Glow1", "Glow", 20.0)])
+    (a,) = plan(report(clip()), tools=tool_report(c, fps=30.0), markers=False)
+    assert a.summary == "bypass ugly_2 (FastNoise) while editing" and a.params["tools"] == ["ugly_2"]
+    assert "without them the comp should play in real time (33 ms/frame)" in a.why
 
 
 def test_plan_markers_from_high_and_medium_findings_only():
@@ -280,6 +325,43 @@ def fake_ffmpeg(cmd):
     return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
+class FxItem:
+    def __init__(self, start, *comps):
+        self.start, self.comps = start, list(comps)
+
+    def GetStart(self):
+        return self.start
+
+    def GetFusionCompByIndex(self, i):
+        return self.comps[i - 1]
+
+
+class FxTimeline(FakeTimeline):
+    def __init__(self, tracks):
+        super().__init__()
+        self.tracks = tracks
+
+    def GetItemListInTrack(self, kind, index):
+        return self.tracks[index - 1]
+
+
+def grain_comp():
+    return CostlyComp(CostlyTool("MediaIn1", "MediaIn", 0), CostlyTool("Grain1", "Grain", 64.0),
+                      CostlyTool("BitmapMask1", "BitmapMask", 32.0), CostlyTool("MediaOut1", "MediaOut", 0))
+
+
+def bypass_action(*items, tools=("Grain1", "BitmapMask1")):
+    return Action("tool-bypass", "x", "bypass", "", {
+        "timeline": "Timeline 1", "comp": 1, "tools": list(tools),
+        "items": [{"label": f"item{i}", "track": 1, "start": s} for i, s in enumerate(items)]})
+
+
+def fx_project(*comps):
+    project = FakeProject([])
+    project.timeline = FxTimeline([[FxItem(100 * i, c) for i, c in enumerate(comps)]])
+    return project
+
+
 # ----------------------------------------------------------- apply/undo
 def test_apply_then_undo_round_trip(tmp_path):
     item = FakeItem(r"D:\f\cam.mp4")
@@ -312,6 +394,68 @@ def test_apply_then_undo_round_trip(tmp_path):
     assert item.props["Super Scale"] == 2
     assert project.timeline.markers == {}
     assert len(Journal(tmp_path / "journal.json")) == 0
+
+
+def test_bypass_tools_then_restore_them_keeps_the_other_fixes(tmp_path):
+    a, b = grain_comp(), grain_comp()
+    project = fx_project(a, b)
+    resolve = FakeResolve(project)
+    setting = Action("setting", "project", "x", "y", {"key": "superScale", "value": "1"})
+    journal = Journal(tmp_path / "j.json")
+    log = []
+    assert apply(resolve, [bypass_action(0, 100), setting], journal, progress=log.append) == []
+    assert log[0] == "  bypassed 4 Fusion tool(s) on 2 clip(s)"
+    assert [t.attrs["TOOLB_PassThrough"] for t in a.tools.values()] == [False, True, True, False]
+    assert not all_active(b) and project.settings["superScale"] == "1"
+    kinds = [e["kind"] for e in Journal(tmp_path / "j.json").entries]
+    assert kinds == ["tool-bypass"] * 4 + ["setting"]
+    assert all(e["project"] == "wowo" for e in journal.entries)
+
+    # every report shouts about it while the tools are off - grouped per clip, for this project only
+    found = bypassed_findings("wowo", Journal(tmp_path / "j.json"))
+    assert [(f.severity, f.code, f.subject) for f in found] == [
+        ("high", "fusion-tools-bypassed", "item0"), ("high", "fusion-tools-bypassed", "item1")]
+    assert found[0].message.startswith("Grain1, BitmapMask1 bypassed by RenderFlow for editing")
+    assert bypassed_findings("other", Journal(tmp_path / "j.json")) == []
+
+    # --restore-tools: the tools come back, the setting stays, the journal keeps it
+    log.clear()
+    assert undo(resolve, Journal(tmp_path / "j.json"), progress=log.append, kinds={"tool-bypass"}) == []
+    assert log == ["  re-enabled 4 Fusion tool(s)"]
+    assert all_active(a, b) and project.settings["superScale"] == "1"
+    assert [e["kind"] for e in Journal(tmp_path / "j.json").entries] == ["setting"]
+    assert bypassed_findings("wowo", Journal(tmp_path / "j.json")) == []
+    assert undo(resolve, Journal(tmp_path / "j.json")) == [] and project.settings["superScale"] == 3
+
+
+def test_bypass_respects_the_editors_own_bypass_and_survives_hand_changes(tmp_path):
+    comp = grain_comp()
+    comp.tools[2].attrs["TOOLB_PassThrough"] = True              # Grain already off by hand
+    project = fx_project(comp)
+    resolve = FakeResolve(project)
+    journal = Journal(tmp_path / "j.json")
+    log = []
+    problems = apply(resolve, [bypass_action(0, tools=("Grain1", "BitmapMask1", "Gone"))], journal,
+                     progress=log.append)
+    assert problems == ["tool-bypass item0: Gone is not in the comp"]
+    assert log[0] == "  bypassed 1 Fusion tool(s) on 1 clip(s) (1 already bypassed by hand)"
+    assert [e["tool"] for e in journal.entries] == ["BitmapMask1"]     # the hand-bypassed one is not ours
+    assert comp.tools[2].sets == []
+
+    comp.tools[3].attrs["TOOLB_PassThrough"] = False             # editor re-enabled the mask meanwhile
+    log.clear()
+    assert undo(resolve, Journal(tmp_path / "j.json"), progress=log.append) == []
+    assert log[0] == "  re-enabled 0 Fusion tool(s) (1 already re-enabled by hand)"
+    assert comp.tools[2].attrs["TOOLB_PassThrough"] is True       # Grain stays as the editor left it
+
+    # the clip moved: the tool cannot be found, the user is told, the entry does not linger
+    journal = Journal(tmp_path / "j.json")
+    journal.add({"kind": "tool-bypass", "subject": "item0", "project": "wowo", "timeline": "Timeline 1",
+                 "track": 1, "start": 999, "comp": 1, "tool": "BitmapMask1"})
+    problems = undo(resolve, Journal(tmp_path / "j.json"))
+    assert problems == ["tool-bypass item0: BitmapMask1 not found - the clip moved or the comp changed "
+                        "since; if it is still bypassed, re-enable it in Fusion by hand"]
+    assert Journal(tmp_path / "j.json").entries == []
 
 
 def test_apply_never_matches_a_clip_by_empty_path(tmp_path):
@@ -443,3 +587,24 @@ def test_full_report_composes_stages_and_reports_skips(monkeypatch):
     full = full_report(object(), decode=False)
     assert full.render is None and any("busy" in s for s in full.skipped)
     assert "skipped:" in full.text()
+
+
+def test_full_report_with_tools_plans_the_bypass_and_flags_tools_left_bypassed(monkeypatch, tmp_path):
+    rep = report(clip())
+    monkeypatch.setattr("renderflow.report.scan", lambda resolve: rep)
+    monkeypatch.setattr("renderflow.report.profile", lambda r, progress=None: {})
+    rp = render_profile(sample("cam.mp4", 40.0, fusion_tools=["Grain"]))
+    monkeypatch.setattr("renderflow.report.render_cost", lambda resolve, progress=None, **kw: rp)
+    tr = tool_report(heavy_comp_cost(rp.samples[0].label))
+    monkeypatch.setattr("renderflow.report.attribute", lambda resolve, profile, progress=None: tr)
+    full = full_report(object(), tools=True)
+    assert "fusion-tool-heavy" in [f.code for f in full.findings]
+    assert [a.kind for a in full.actions] == ["setting", "tool-bypass", "marker"]
+    assert "FUSION TOOLS" in full.text() and full.to_dict()["tools"]["comps"][0]["tools"][1]["name"] == "Grain1"
+
+    # an earlier apply left tools off: the next report says so, whether or not tools are measured
+    Journal().add({"kind": "tool-bypass", "subject": rp.samples[0].label, "project": "wowo",
+                   "timeline": "Timeline 1", "track": 1, "start": 216000, "comp": 1, "tool": "Grain1"})
+    full = full_report(object(), decode=False)
+    assert [(f.severity, f.code) for f in full.findings if "bypassed" in f.code] == [("high", "fusion-tools-bypassed")]
+    assert any("fix --restore-tools" in n for n in full.notes) and "--restore-tools" in full.text()

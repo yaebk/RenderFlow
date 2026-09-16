@@ -1,7 +1,7 @@
 """Apply the fixes the measurements justify - and undo them.
 
-Three kinds of change, each one reversible and written to a journal before it
-is made, so a crash halfway through still leaves an undo trail:
+Four kinds of change, each one reversible and written to a journal as it is
+made, so a crash halfway through still leaves an undo trail:
 
 * **proxies** - a DNxHR LB proxy for every clip whose decode measured below
   2x real time (or every long-GOP clip, if asked), linked with
@@ -15,6 +15,12 @@ is made, so a crash halfway through still leaves an undo trail:
   finding, so the report is visible inside Resolve. Tagged with custom data so
   undo removes exactly these. Frames that already have a marker are skipped:
   Resolve allows one per frame.
+* **tool bypass** - when the tool attribution has run, the Fusion tools it
+  measured as the cost of a below-real-time comp are switched to pass-through
+  (the node's own bypass button) so the clip plays while editing. Nothing is
+  deleted or changed; the effect is simply off until ``fix --restore-tools``
+  (or ``--undo``) puts it back, and every report carries a high finding
+  while it is off so a delivery is not made without it.
 
 What is deliberately *not* here: render-in-place. Smart Render Cache is
 Resolve's own answer for effect-heavy clips on every edition, it does not
@@ -43,7 +49,8 @@ from renderflow.proxies import (
     plan_proxy,
 )
 from renderflow.rendercost import RenderProfile
-from renderflow.scan import ClipInfo, Finding, ScanReport, _walk_folders
+from renderflow.scan import ClipInfo, Finding, ScanReport, _walk_folders, timeline_named
+from renderflow.tools import ToolReport, find_tool, heavy_tools, is_passing, set_passing
 
 JOURNAL_PATH = Path.home() / ".renderflow" / "journal.json"
 MARKER_TAG = "renderflow"
@@ -55,7 +62,7 @@ MARKED_CODES = {"render-heavy", "render-slow", "decode-below-realtime", "decode-
 
 @dataclass
 class Action:
-    kind: str                       # proxy | setting | clip-setting | marker
+    kind: str                       # proxy | setting | clip-setting | marker | tool-bypass
     subject: str
     summary: str
     why: str
@@ -76,11 +83,13 @@ class Action:
 def plan(report: ScanReport, render: RenderProfile | None = None, findings: list[Finding] | None = None,
          proxies: str = "auto", settings: bool = True, markers: bool = True,
          proxy_dir: Path | str = DEFAULT_PROXY_DIR, max_width: int = DEFAULT_MAX_WIDTH,
-         platform: str | None = None, notes: list[str] | None = None) -> list[Action]:
+         platform: str | None = None, notes: list[str] | None = None,
+         tools: ToolReport | None = None) -> list[Action]:
     """Decide what to change. ``proxies`` is ``auto`` (measured < 2x), ``all`` (every
     long-GOP clip) or ``none``. ``findings`` defaults to the report's own. Things
     worth telling the user that are not actions (findings that could not be
-    marked) are appended to ``notes`` when a list is given."""
+    marked) are appended to ``notes`` when a list is given. With a ``tools``
+    report, the tools it measured as the cost of a heavy comp are bypassed."""
     findings = report.findings if findings is None else findings
     platform = platform or report.platform
     actions: list[Action] = []
@@ -143,6 +152,42 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
             {"key": "perfRenderCacheMode", "value": "smart", "old": report.settings.render_cache_mode},
         ))
 
+    # -- tool bypass --------------------------------------------------------
+    # Costliest first, and only as many as it takes to fit the frame budget: the
+    # point is playback, not a bare comp.
+    for c in (tools.comps if tools else []):
+        frame_ms = tools.frame_ms
+        chosen: list = []
+        saved = 0.0
+        for t in heavy_tools(c, frame_ms):
+            if c.ms_per_frame - saved <= frame_ms:
+                break
+            chosen.append(t)
+            saved += t.saved_ms_per_frame
+        if not chosen:
+            continue
+        saved = min(saved, c.ms_per_frame)
+        left = c.ms_per_frame - saved
+        if left <= frame_ms:
+            outcome = f"without them the comp should play in real time ({frame_ms:.0f} ms/frame)."
+        else:
+            stuck = [t for t in c.tools if not t.ok]
+            outcome = f"~{left:.0f} ms/frame is left, still over real time ({frame_ms:.0f}): " + (
+                ", ".join(_tool_name(t) for t in stuck) + " cannot be bypassed - the comp does not "
+                "render without it" if stuck else "the rest is spread over smaller tools"
+            ) + ". Smart cache covers what remains."
+        actions.append(Action(
+            "tool-bypass", c.label + (f" (+{len(c.copies)} more)" if c.copies else ""),
+            f"bypass {', '.join(_tool_name(t) for t in chosen)} while editing",
+            f"Measured: these cost ~{saved:.0f} of the comp's {c.ms_per_frame:.0f} ms/frame; {outcome} "
+            "This is the node's own pass-through switch: nothing is deleted or changed, but the "
+            "effect is off in the viewer and in any render until it is put back, and every report "
+            "says so in red until then. Re-enable before delivery with  fix --restore-tools  (or "
+            "fix --undo).",
+            {"timeline": tools.timeline, "comp": c.comp, "tools": [t.name for t in chosen],
+             "items": [{"label": c.label, "track": c.track, "start": c.start}] + list(c.copies)},
+        ))
+
     # -- markers ------------------------------------------------------------
     if markers and report.timeline and report.timeline.items:
         stretches = [{"name": s.label, "track": 0, "start": s.start, "end": s.end, "clip": "",
@@ -153,6 +198,12 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
 
 def _has_proxy(clip: ClipInfo) -> bool:
     return clip.proxy not in ("", "None")
+
+
+def _tool_name(t) -> str:
+    """``Grain1``; but ``donttouch_3_1_2 (BitmapMask)`` when the name does not say what it is."""
+    kind = t.kind.rsplit(".", 1)[-1]
+    return t.name if kind.lower() in t.name.lower() else f"{t.name} ({kind})"
 
 
 def marker_actions(report: ScanReport, findings: list[Finding],
@@ -237,8 +288,8 @@ def plan_text(actions: list[Action], notes: list[str] = ()) -> str:
 
 # ---------------------------------------------------------------- journal
 class Journal:
-    def __init__(self, path: Path | str | None = JOURNAL_PATH):
-        self.path = Path(path) if path else None
+    def __init__(self, path: Path | str | None = None):
+        self.path = Path(path) if path else JOURNAL_PATH        # looked up at call time (tests move it)
         self.entries: list[dict[str, Any]] = []
         if self.path and self.path.exists():
             try:
@@ -272,21 +323,6 @@ def _media_item_by_path(project, path: str):
     return None
 
 
-def _timeline_named(project, name: str):
-    """The project's timeline called ``name``, or None if there is no such timeline."""
-    current = project.GetCurrentTimeline()
-    if current is not None and str(current.GetName()) == name:
-        return current
-    try:
-        for index in range(1, int(project.GetTimelineCount()) + 1):
-            timeline = project.GetTimelineByIndex(index)
-            if timeline is not None and str(timeline.GetName()) == name:
-                return timeline
-    except Exception:
-        pass
-    return None
-
-
 def _marker_refusal(timeline, frame: int) -> str:
     """Why Resolve refused AddMarker: usually another marker on that frame."""
     try:
@@ -307,7 +343,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
     problems: list[str] = []
     say = progress or (lambda _m: None)
     marked = 0
-    name = _project_name(project)
+    name = project_name(project)
 
     def record(entry: dict[str, Any]) -> None:
         journal.add({**entry, "project": name})     # so undo knows which project it belongs to
@@ -348,7 +384,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 say(f"  {action.subject}: {p['key']} {old} -> {p['value']}")
 
             elif action.kind == "marker":
-                timeline = _timeline_named(project, p["timeline"])
+                timeline = timeline_named(project, p["timeline"])
                 if timeline is None:
                     raise RuntimeError(f"timeline {p['timeline']!r} not found")
                 if not timeline.AddMarker(p["frame"], p["color"], p["name"], p["note"],
@@ -357,6 +393,28 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 record({"kind": "marker", "subject": action.subject, "custom": p["custom"],
                         "timeline": p["timeline"]})
                 marked += 1
+
+            elif action.kind == "tool-bypass":
+                timeline = timeline_named(project, p["timeline"])
+                if timeline is None:
+                    raise RuntimeError(f"timeline {p['timeline']!r} not found")
+                done = by_hand = 0
+                for it in p["items"]:
+                    for tool_name in p["tools"]:
+                        entry = {"timeline": p["timeline"], "track": it["track"], "start": it["start"],
+                                 "comp": p["comp"], "tool": tool_name}
+                        tool = find_tool(timeline, entry)
+                        if tool is None:
+                            problems.append(f"tool-bypass {it['label']}: {tool_name} is not in the comp")
+                        elif is_passing(tool):
+                            by_hand += 1                # bypassed by the editor: not ours to re-enable
+                        elif not set_passing(tool, True):
+                            problems.append(f"tool-bypass {it['label']}: Resolve refused to bypass {tool_name}")
+                        else:
+                            record({"kind": "tool-bypass", "subject": it["label"], **entry})
+                            done += 1
+                say(f"  bypassed {done} Fusion tool(s) on {len(p['items'])} clip(s)"
+                    + (f" ({by_hand} already bypassed by hand)" if by_hand else ""))
             else:
                 raise RuntimeError(f"unknown action kind {action.kind}")
         except Exception as exc:
@@ -367,7 +425,8 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
     return problems
 
 
-def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None] | None = None) -> list[str]:
+def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None] | None = None,
+         kinds: set[str] | None = None) -> list[str]:
     """Reverse every journaled change, newest first. Returns problems (empty = clean).
 
     Only changes made to the project that is open now are reversed; the rest
@@ -375,19 +434,23 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
     was changed again by hand since we set it is left as it is. Afterwards any
     RenderFlow marker still on the current timeline is removed too: every one
     carries our tag, so they are ours even if the journal that recorded them
-    is gone.
+    is gone. With ``kinds``, only entries of those kinds are reversed and the
+    rest of the journal is kept (``fix --restore-tools``).
     """
     journal = journal if journal is not None else Journal()
     project = resolve.GetProjectManager().GetCurrentProject()
     problems: list[str] = []
     say = progress or (lambda _m: None)
     remaining: list[dict[str, Any]] = []
-    removed = gone = 0
-    name = _project_name(project)
+    removed = gone = reenabled = by_hand = 0
+    name = project_name(project)
     elsewhere: dict[str, int] = {}
 
     for entry in reversed(journal.entries):
         owner = entry.get("project")
+        if kinds is not None and entry.get("kind") not in kinds:
+            remaining.append(entry)
+            continue
         if owner and owner != name:
             elsewhere[owner] = elsewhere.get(owner, 0) + 1
             remaining.append(entry)
@@ -421,27 +484,64 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
                     item.SetClipProperty(entry["key"], entry["old"])
                     say(f"  {entry['subject']}: {entry['key']} restored to {entry['old']}")
             elif kind == "marker":
-                timeline = _timeline_named(project, entry["timeline"])
+                timeline = timeline_named(project, entry["timeline"])
                 if timeline is None:
                     raise RuntimeError(f"timeline {entry['timeline']!r} not found")
                 if timeline.DeleteMarkerByCustomData(entry["custom"]):
                     removed += 1
                 else:
                     gone += 1
+            elif kind == "tool-bypass":
+                timeline = timeline_named(project, entry["timeline"])
+                if timeline is None:
+                    raise RuntimeError(f"timeline {entry['timeline']!r} not found")
+                tool = find_tool(timeline, entry)
+                if tool is None:
+                    # The clip moved or the comp changed: we cannot find it, so we cannot
+                    # leave it in the journal either - say so loudly instead.
+                    problems.append(f"tool-bypass {entry['subject']}: {entry['tool']} not found - the "
+                                    "clip moved or the comp changed since; if it is still bypassed, "
+                                    "re-enable it in Fusion by hand")
+                elif not is_passing(tool):
+                    by_hand += 1                        # re-enabled by the editor since
+                elif set_passing(tool, False):
+                    reenabled += 1
+                else:
+                    raise RuntimeError(f"Resolve refused to re-enable {entry['tool']}")
         except Exception as exc:
             problems.append(f"{entry.get('kind')} {entry.get('subject')}: {exc}")
             remaining.append(entry)
     if removed or gone:
         say(f"  removed {removed} marker(s)" + (f" ({gone} already deleted by hand)" if gone else ""))
+    if reenabled or by_hand:
+        say(f"  re-enabled {reenabled} Fusion tool(s)"
+            + (f" ({by_hand} already re-enabled by hand)" if by_hand else ""))
     for owner, count in elsewhere.items():
         problems.append(f"{count} change(s) were made to project {owner!r}, not {name!r} - "
                         "open that project and run --undo again")
     journal.entries = list(reversed(remaining))
     journal.save()
-    swept = sweep_markers(project)
-    if swept:
-        say(f"  removed {swept} leftover RenderFlow marker(s) the journal did not know about")
+    if kinds is None:
+        swept = sweep_markers(project)
+        if swept:
+            say(f"  removed {swept} leftover RenderFlow marker(s) the journal did not know about")
     return problems
+
+
+def bypassed_findings(project: str, journal: Journal | None = None) -> list[Finding]:
+    """A high finding per clip whose Fusion tools an earlier apply left bypassed,
+    so no report - and no delivery - goes out without noticing."""
+    journal = journal if journal is not None else Journal()
+    by_item: dict[str, list[str]] = {}
+    for e in journal.entries:
+        if e.get("kind") == "tool-bypass" and e.get("project") == project:
+            by_item.setdefault(e["subject"], []).append(e["tool"])
+    return [Finding(
+        "high", "fusion-tools-bypassed", label,
+        f"{', '.join(names)} bypassed by RenderFlow for editing - off in playback and in any render",
+        "An earlier fix --apply switched these to pass-through so the clip plays in real time. "
+        "Put them back before delivery:  python -m renderflow fix --restore-tools  (keeps every "
+        "other fix) or fix --undo.") for label, names in by_item.items()]
 
 
 def _changed_since(entry: dict[str, Any], current: Any) -> bool:
@@ -450,7 +550,7 @@ def _changed_since(entry: dict[str, Any], current: Any) -> bool:
     return "new" in entry and str(current) != str(entry["new"])
 
 
-def _project_name(project) -> str:
+def project_name(project) -> str:
     try:
         return str(project.GetName() or "")
     except Exception:

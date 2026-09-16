@@ -74,6 +74,8 @@ the user which tool to check in Fusion.
 python -m renderflow fix            # prints the plan, changes nothing
 python -m renderflow fix --apply    # makes the changes, journaled
 python -m renderflow fix --undo     # reverses every journaled change
+python -m renderflow fix --tools    # also measures Fusion tools and plans bypassing the costly ones
+python -m renderflow fix --restore-tools   # re-enables bypassed tools only (before delivery)
 ```
 
 Fix kinds: proxies (DNxHR LB via FFmpeg, linked with `LinkProxyMedia`, plus
@@ -81,9 +83,18 @@ Playback -> Proxy Handling -> Prefer Proxies, without which Resolve ignores
 them); settings (Render Cache -> Smart when a clip measured heavy and carries
 effects; Super Scale off); timeline markers over clips with high/medium
 findings (red = high, yellow = medium, one per frame; a frame that already
-has the user's own marker is left alone). `--proxies all` forces proxies for
-every long-GOP clip; `--no-markers` / `--no-settings` narrow the plan;
-`--no-render` plans without the render measurement.
+has the user's own marker is left alone); tool bypass (with `--tools`: the
+Fusion tools measured as the cost of a below-real-time comp are switched to
+pass-through while editing - nothing deleted, effect off until restored).
+`--proxies all` forces proxies for every long-GOP clip; `--no-markers` /
+`--no-settings` / `--no-bypass` narrow the plan; `--no-render` plans without
+the render measurement.
+
+A `fusion-tools-bypassed` finding (always high) means an earlier apply left
+tools off. Tell the user plainly which clips, that the effect is missing from
+playback and from any export, and that `fix --restore-tools` puts them back
+without undoing proxies or settings. Never let a delivery go out with it
+showing.
 
 Always show the user the plan and get a yes before `--apply`. Tell them
 `--undo` exists: it reverses the journal for the project that is open, leaves

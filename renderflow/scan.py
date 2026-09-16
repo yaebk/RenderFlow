@@ -386,6 +386,21 @@ def read_timeline(project, clips: list[ClipInfo]) -> TimelineInfo | None:
     )
 
 
+def timeline_named(project, name: str):
+    """The project's timeline called ``name``, or None if there is no such timeline."""
+    current = project.GetCurrentTimeline()
+    if current is not None and str(current.GetName()) == name:
+        return current
+    try:
+        for index in range(1, int(project.GetTimelineCount()) + 1):
+            timeline = project.GetTimelineByIndex(index)
+            if timeline is not None and str(timeline.GetName()) == name:
+                return timeline
+    except Exception:
+        pass
+    return None
+
+
 def _markers(timeline) -> dict[int, str]:
     try:
         raw = timeline.GetMarkers() or {}
@@ -421,7 +436,9 @@ def _safe_int(fn) -> int:
 
 
 def _fusion_tools(item) -> list[str]:
-    """Tool types in the clip's Fusion comps, ignoring the default passthrough."""
+    """Tool types in the clip's Fusion comps, ignoring the default passthrough and
+    bypassed tools: a bypassed tool renders nothing, so it counts for nothing
+    here - and its absence changes the render-cost cache key, as it should."""
     found: list[str] = []
     try:
         for index in range(1, _safe_int(item.GetFusionCompCount) + 1):
@@ -429,8 +446,9 @@ def _fusion_tools(item) -> list[str]:
             if comp is None:
                 continue
             for tool in (comp.GetToolList() or {}).values():
-                reg_id = str((tool.GetAttrs() or {}).get("TOOLS_RegID") or "")
-                if reg_id and reg_id not in FUSION_PASSTHROUGH:
+                attrs = tool.GetAttrs() or {}
+                reg_id = str(attrs.get("TOOLS_RegID") or "")
+                if reg_id and reg_id not in FUSION_PASSTHROUGH and not attrs.get("TOOLB_PassThrough"):
                     found.append(reg_id)
     except Exception:
         pass

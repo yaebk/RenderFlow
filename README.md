@@ -148,6 +148,13 @@ Only what the measurements support:
   frame, so clips on different tracks that start together share one, and a
   frame that already has a marker of your own is left alone (the plan says
   which).
+- With `fix --tools`, the Fusion tools measured as the cost of a clip that
+  renders below real time are bypassed while you edit - the node's own
+  pass-through switch, on every clip that carries the same comp. Nothing is
+  deleted or changed, but the effect is off in the viewer and in any render
+  until it is put back, so every report carries a red finding until then.
+  `fix --restore-tools` puts them back and keeps every other fix; a tool you
+  had bypassed yourself is not touched either way.
 
 `fix` alone prints the plan and changes nothing. `fix --apply` writes a
 journal to `~/.renderflow/journal.json` as it goes; `fix --undo` walks it
@@ -155,8 +162,9 @@ backwards for the project that is open (changes to another project wait until
 you open it), leaves any setting you have changed by hand since, and also
 clears any RenderFlow marker still on the timeline even if the journal is gone
 (they are tagged). `--proxies all` forces proxies for every
-long-GOP clip; `--proxies none`, `--no-markers` and `--no-settings` narrow the
-plan; `--no-render` plans without the render measurement.
+long-GOP clip; `--proxies none`, `--no-markers`, `--no-settings` and
+`--no-bypass` narrow the plan; `--no-render` plans without the render
+measurement.
 
 Render-in-place is deliberately not included. Smart cache covers the same
 case without freezing the content.

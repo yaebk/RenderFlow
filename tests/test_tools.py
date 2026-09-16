@@ -97,7 +97,8 @@ def test_attribute_measures_each_tool_and_puts_everything_back(tmp_path):
     assert tr.problems == []
     assert [c.label for c in tr.comps] == ["fx @V1 00:00:00:00"]          # the identical comp measured once
     (c,) = tr.comps
-    assert c.copies == ["copy @V1 00:01:40:00"] and c.frames == 90 and c.ok
+    assert c.copies == [{"label": "copy @V1 00:01:40:00", "track": 1, "start": 6000}]
+    assert c.frames == 90 and c.ok
     assert round(c.ms_per_frame) == 170                                    # 5 + 100 + 5 + 60, set-up removed
     assert {(t.name, t.kind, round(t.saved_ms_per_frame)) for t in c.tools} == {
         ("Grain1", "Grain", 100), ("CC1", "ColorCorrector", 5), ("Noise", "FastNoise", 60)}
