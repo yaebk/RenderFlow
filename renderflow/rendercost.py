@@ -35,11 +35,16 @@ put back when the run ends, the sample job is deleted from the queue, and
 the output files are removed. Any render jobs already in the queue are left
 alone. It refuses to start if a render is already in progress.
 
+The Deliver page renders from the project's Render Cache when it is on and
+built, so with Smart or User cache the numbers say how the timeline plays
+*from cache*; with it off they are the raw cost of the effects. The report
+says which; the plan proposes Smart cache only from raw numbers.
+
 Results are cached in ~/.renderflow/render.json, keyed by everything that
 should change the number: the item (source file, position, length, Fusion
-tools, grade node count), the timeline's format, the sample codec and lengths,
-and the CPU. A parameter tweak inside an effect does not change the key, so
-``--remeasure`` forces a fresh run.
+tools, grade node count), the timeline's format, the Render Cache mode, the
+sample codec and lengths, and the CPU. A parameter tweak inside an effect
+does not change the key, so ``--remeasure`` forces a fresh run.
 """
 
 from __future__ import annotations
@@ -154,6 +159,12 @@ class RenderProfile:
     estimated_export_s: float = 0.0
     shares: dict[str, float] = field(default_factory=dict)   # sample label -> share of export time
     total_frames: int = 0
+    render_cache: str = "none"      # perfRenderCacheMode while measuring: none | smart | user
+
+    @property
+    def from_cache_mode(self) -> bool:
+        """True if Resolve may have rendered the samples from its Render Cache."""
+        return self.render_cache not in ("", "none")
 
     def ratio(self, sample: RenderSample) -> float:
         return sample.render_fps / self.fps if self.fps and sample.ok else 0.0
@@ -174,7 +185,7 @@ class RenderProfile:
         note = (f", per-job overhead ~{sum(overheads) / len(overheads):.0f} ms removed"
                 if overheads else "")
         lines = [f"timeline : {self.timeline} @ {self.fps:g} fps, sample codec "
-                 f"{self.format}/{self.codec}{note}",
+                 f"{self.format}/{self.codec}, Render Cache {self.render_cache or 'none'}{note}",
                  f"{'clip':<34} {'trk':>3} {'frames':>7} {'ms/frame':>9} {'render':>8} "
                  f"{'ratio':>6} {'export':>7}  carries"]
         for s in self.samples:
@@ -210,6 +221,11 @@ class RenderProfile:
         if short:
             lines.append("")
             lines.append(self._short_note(short))
+        if self.from_cache_mode:
+            lines.append("")
+            lines.append(f"Render Cache is {self.render_cache}: clips it has already cached render from "
+                         "the cache here, so these numbers are how the timeline plays once the cache "
+                         "is built, not what the effects cost. Set it to None and --remeasure for that.")
         if self.estimated_export_s:
             minutes, seconds = divmod(int(round(self.estimated_export_s)), 60)
             lines.append("")
@@ -515,7 +531,8 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     cache = cache if cache is not None else RenderCache(RENDER_CACHE_PATH)
     timeline_fp = "|".join(str(timeline.GetSetting(k) or "") for k in
                            ("timelineFrameRate", "timelineResolutionWidth", "timelineResolutionHeight"))
-    timeline_fp += f"|{queue.format}/{queue.codec}"
+    render_cache = str(project.GetSetting("perfRenderCacheMode") or "none")
+    timeline_fp += f"|{queue.format}/{queue.codec}|cache={render_cache}"
 
     samples: list[RenderSample] = []
     stretches = plan_stretches(items, fps, seconds)
@@ -588,7 +605,8 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     if reused and progress:
         progress(f"render: {reused} sample(s) from cache")
 
-    profile = RenderProfile(str(timeline.GetName()), fps, queue.format, queue.codec, samples)
+    profile = RenderProfile(str(timeline.GetName()), fps, queue.format, queue.codec, samples,
+                            render_cache=render_cache)
     estimate_export(profile)
     return profile
 
@@ -683,11 +701,18 @@ def apply_render_measurements(report: ScanReport, profile: RenderProfile) -> Non
             continue
         noted.add(f.subject)
         where = " (in a stretch of short clips)" if sample.stretch else ""
-        kept.append(Finding(
-            "info", "fx-measured-ok", f.subject,
-            f"effects measured fine: renders at {ratio:.2f}x real time{where}",
-            "The scan flagged the effects on this clip as probably expensive; Resolve's own "
-            "render queue says otherwise on this machine, so they are not a bottleneck here."))
+        if profile.from_cache_mode:
+            kept.append(Finding(
+                "info", "fx-cached-ok", f.subject,
+                f"plays from the Render Cache at {ratio:.2f}x real time{where}",
+                f"Render Cache is {profile.render_cache}, so Resolve rendered this from the cache; "
+                "fine to play once the cache is built. The raw cost of the effects was not measured."))
+        else:
+            kept.append(Finding(
+                "info", "fx-measured-ok", f.subject,
+                f"effects measured fine: renders at {ratio:.2f}x real time{where}",
+                "The scan flagged the effects on this clip as probably expensive; Resolve's own "
+                "render queue says otherwise on this machine, so they are not a bottleneck here."))
     report.findings = sort_findings(kept)
 
 

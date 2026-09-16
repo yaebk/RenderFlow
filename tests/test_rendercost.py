@@ -117,11 +117,15 @@ class FakeProject:
                                                          "mp4": {"H.264": "H264"}}
         self.format = {"format": "mp4", "codec": "H264"}
         self.settings = {}
+        self.project_settings = {"perfRenderCacheMode": "none"}
         self.jobs = {"user-job": {"JobStatus": "Ready"}}
         self.rendering = False
         self.deleted = []
         self.fail_ranges = set(fail_ranges)
         self.log = []
+
+    def GetSetting(self, key):
+        return self.project_settings.get(key)
 
     def GetCurrentTimeline(self):
         return self.timeline
@@ -526,6 +530,14 @@ def test_render_cost_reuses_cached_samples_and_keys_on_what_matters(tmp_path):
     resolve, project = make([[FakeItem("plain", 0, 6000, 10.0, comps=[FakeComp("Blur")])]])
     rc3 = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path / "c")))
     assert not rc3.samples[0].from_cache and len(project.deleted) == rendered
+
+    # the Render Cache was turned on since: what Resolve renders from changes, so measure again
+    resolve, project = make([v1])
+    project.project_settings["perfRenderCacheMode"] = "smart"
+    rc5 = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path / "e")))
+    assert not rc5.samples[0].from_cache and rc5.render_cache == "smart" and rc5.from_cache_mode
+    assert "Render Cache smart" in rc5.text() and "Set it to None and --remeasure" in rc5.text()
+    assert not rc2.from_cache_mode and "Set it to None" not in rc2.text()
 
     # --remeasure: an in-memory cache renders again and writes nothing
     resolve, project = make([v1])
