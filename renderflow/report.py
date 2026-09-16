@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from renderflow.fix import Action, plan, plan_text
 from renderflow.profile import DecodeMeasure, FFmpegMissing, measured_text, profile
-from renderflow.rendercost import RenderProfile, render_cost, render_findings
+from renderflow.rendercost import RenderProfile, apply_render_measurements, render_cost, render_findings
 from renderflow.scan import Finding, ScanReport, findings_text, scan, sort_findings
 
 
@@ -76,6 +76,8 @@ def full_report(resolve, decode: bool = True, render: bool = True, proxies: str 
     else:
         report.skipped.append("render-cost profiling (disabled)")
 
+    if report.render:
+        apply_render_measurements(scan_report, report.render)
     findings = list(scan_report.findings)
     if report.render:
         findings.extend(render_findings(report.render))

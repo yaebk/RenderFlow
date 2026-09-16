@@ -57,6 +57,7 @@ from typing import Any, Callable
 
 from renderflow.scan import (
     Finding,
+    ScanReport,
     _fusion_tools,
     _int,
     _node_count,
@@ -646,6 +647,48 @@ def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 # -------------------------------------------------------------- findings
+GUESSED_FX = {"fusion-comp", "deep-grade"}     # the scan's rules of thumb about effects
+
+
+def apply_render_measurements(report: ScanReport, profile: RenderProfile) -> None:
+    """Let the measurement override the scan's guesses about effects.
+
+    The scan flags every Fusion comp and deep grade as probably expensive. Once
+    the item has actually been rendered - on its own or inside a stretch - that
+    guess is replaced: at or above real time it becomes an info note saying so;
+    below it, an item's own ``render-*`` finding already says what is wrong,
+    and inside a heavy stretch the guess stays, since it is the best pointer to
+    which cut carries the cost.
+    """
+    own = {s.label: s for s in profile.samples if s.ok and not s.stretch}
+    within = {label: s for s in profile.samples if s.ok and s.stretch for label in s.clips}
+    kept: list[Finding] = []
+    noted: set[str] = set()
+    for f in report.findings:
+        if f.code not in GUESSED_FX:
+            kept.append(f)
+            continue
+        sample = own.get(f.subject) or within.get(f.subject)
+        if sample is None:
+            kept.append(f)
+            continue
+        ratio = profile.ratio(sample)
+        if ratio < 1.0:
+            if sample.stretch:
+                kept.append(f)
+            continue
+        if f.subject in noted:
+            continue
+        noted.add(f.subject)
+        where = " (in a stretch of short clips)" if sample.stretch else ""
+        kept.append(Finding(
+            "info", "fx-measured-ok", f.subject,
+            f"effects measured fine: renders at {ratio:.2f}x real time{where}",
+            "The scan flagged the effects on this clip as probably expensive; Resolve's own "
+            "render queue says otherwise on this machine, so they are not a bottleneck here."))
+    report.findings = sort_findings(kept)
+
+
 def render_findings(profile: RenderProfile) -> list[Finding]:
     out: list[Finding] = []
     good = [s for s in profile.samples if s.ok]

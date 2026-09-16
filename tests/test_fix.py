@@ -423,10 +423,12 @@ def test_full_report_composes_stages_and_reports_skips(monkeypatch):
     monkeypatch.setattr("renderflow.report.scan", lambda resolve: rep)
     monkeypatch.setattr("renderflow.report.profile", lambda r, progress=None: {})
     rp = render_profile(sample("cam.mp4", 40.0, fusion_tools=["Blur"]))
+    rep.findings.append(Finding("medium", "fusion-comp", rp.samples[0].label, "Fusion composition", "guess"))
     monkeypatch.setattr("renderflow.report.render_cost", lambda resolve, progress=None, **kw: rp)
     full = full_report(object())
     codes = [f.code for f in full.findings]
     assert "render-heavy" in codes and "codec-long-gop" in codes
+    assert "fusion-comp" not in codes                       # measured heavy: the guess gave way
     assert full.findings[0].severity == "high"
     kinds = {a.kind for a in full.actions}
     assert kinds == {"setting", "marker"}                       # smart cache + marker

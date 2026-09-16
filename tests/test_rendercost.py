@@ -15,6 +15,7 @@ from renderflow.rendercost import (
     _merge,
     _subtract,
     choose_format,
+    apply_render_measurements,
     estimate_export,
     plan_stretches,
     render_cost,
@@ -414,6 +415,35 @@ def test_render_cost_measures_fast_cut_sections_as_stretches(tmp_path):
     rc2 = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path / "b")))
     again = [s for s in rc2.samples if s.stretch]
     assert not again[0].from_cache and again[1].from_cache
+
+
+def test_measured_render_overrides_the_scans_effect_guesses():
+    from renderflow.scan import Finding, ProjectSettings, ScanReport
+    guess = lambda subject, code="fusion-comp": Finding("medium", code, subject, "Fusion composition", "guess")
+    rep = ScanReport("p", "win32", None, ProjectSettings("1", "", "none", "", False, "", 1), [])
+    rep.findings = [guess("fine @V1 a"), guess("fine @V1 a", "deep-grade"), guess("heavy @V1 b"),
+                    guess("in-ok-stretch @V1 c"), guess("in-heavy-stretch @V1 d"),
+                    guess("unmeasured @V1 e"), Finding("medium", "seek-slow", "fine @V1 a", "x", "y")]
+    fast, slow = 4.0 * 24, 90.0 * 24                                   # ms for 24 frames
+    rp = RenderProfile("t", 60.0, "mov", "DNxHRLB", [
+        RenderSample("fine", 1, 0, 600, 0, 24, fast, "Complete", label="fine @V1 a"),
+        RenderSample("heavy", 1, 600, 1200, 600, 24, slow, "Complete", label="heavy @V1 b"),
+        RenderSample("s1", 0, 1200, 1400, 1200, 24, fast, "Complete", label="stretch 1",
+                     clips=["in-ok-stretch @V1 c"]),
+        RenderSample("s2", 0, 1400, 1600, 1400, 24, slow, "Complete", label="stretch 2",
+                     clips=["in-heavy-stretch @V1 d"]),
+    ])
+    apply_render_measurements(rep, rp)
+    assert [(f.code, f.subject) for f in rep.findings] == [
+        ("seek-slow", "fine @V1 a"),                        # not an effects guess: untouched
+        ("fusion-comp", "in-heavy-stretch @V1 d"),          # heavy stretch: the guess still points at the cut
+        ("fusion-comp", "unmeasured @V1 e"),                # never rendered: guess stands
+        ("fx-measured-ok", "fine @V1 a"),                   # two guesses on one item -> one note
+        ("fx-measured-ok", "in-ok-stretch @V1 c"),
+    ]                                                       # heavy @V1 b: dropped, render-heavy says it
+    ok = [f for f in rep.findings if f.code == "fx-measured-ok"]
+    assert ok[0].message == "effects measured fine: renders at 4.17x real time"
+    assert ok[1].message.endswith("4.17x real time (in a stretch of short clips)")
 
 
 def test_stretch_with_a_finding_gets_one_marker_spanning_it(tmp_path):
