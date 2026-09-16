@@ -340,6 +340,18 @@ def test_undo_tolerates_a_marker_the_editor_already_deleted(tmp_path):
     assert Journal(tmp_path / "j.json").entries == []
 
 
+def test_undo_sweeps_tagged_markers_the_journal_lost(tmp_path):
+    project = FakeProject([])
+    tl = project.timeline
+    tl.AddMarker(0, "Red", "RenderFlow: render-heavy", "n", 5, "renderflow:216000")
+    tl.AddMarker(9, "Red", "RenderFlow: fusion-comp", "n", 5, "renderflow:216009")
+    tl.AddMarker(20, "Blue", "Marker 1", "", 1)                    # the editor's own: kept
+    log = []
+    assert undo(FakeResolve(project), Journal(tmp_path / "j.json"), progress=log.append) == []
+    assert list(tl.markers) == [20]
+    assert log == ["  removed 2 leftover RenderFlow marker(s) the journal did not know about"]
+
+
 def test_undo_keeps_entries_it_could_not_reverse(tmp_path):
     project = FakeProject([])
     journal = Journal(tmp_path / "j.json")

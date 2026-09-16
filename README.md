@@ -111,7 +111,8 @@ Only what the measurements support:
 - Timeline markers over clips with findings.
 
 `fix --apply` writes a journal to `~/.renderflow/journal.json`; `fix --undo`
-walks it backwards. `--proxies all` forces proxies for every long-GOP clip;
+walks it backwards, and also clears any RenderFlow marker left on the timeline
+even if the journal is gone (they are tagged). `--proxies all` forces proxies for every long-GOP clip;
 `--proxies none`, `--no-markers` and `--no-settings` narrow the plan.
 
 Render-in-place is deliberately not included. Smart cache covers the same

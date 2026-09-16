@@ -139,10 +139,8 @@ def main(argv=None) -> int:
         if args.command == "fix":
             if args.undo:
                 journal = Journal()
-                if not journal.entries:
-                    print("nothing to undo - the journal is empty.")
-                    return 0
-                print(f"undoing {len(journal)} change(s) ...")
+                print(f"undoing {len(journal)} change(s) ..." if journal.entries
+                      else "the journal is empty - checking the timeline for leftover markers ...")
                 problems = undo(resolve, journal, progress=print)
                 print("done." if not problems else f"{len(problems)} problem(s): " + "; ".join(problems))
                 return 1 if problems else 0

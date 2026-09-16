@@ -352,7 +352,12 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
 
 
 def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None] | None = None) -> list[str]:
-    """Reverse every journaled change, newest first. Returns problems (empty = clean)."""
+    """Reverse every journaled change, newest first. Returns problems (empty = clean).
+
+    Afterwards any RenderFlow marker still on the current timeline is removed
+    too: every one carries our tag, so they are ours even if the journal that
+    recorded them is gone.
+    """
     journal = journal if journal is not None else Journal()
     project = resolve.GetProjectManager().GetCurrentProject()
     problems: list[str] = []
@@ -396,4 +401,24 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
         say(f"  removed {removed} marker(s)" + (f" ({gone} already deleted by hand)" if gone else ""))
     journal.entries = list(reversed(remaining))
     journal.save()
+    swept = sweep_markers(project)
+    if swept:
+        say(f"  removed {swept} leftover RenderFlow marker(s) the journal did not know about")
     return problems
+
+
+def sweep_markers(project) -> int:
+    """Delete every marker tagged as ours from the current timeline. Returns how many."""
+    timeline = project.GetCurrentTimeline()
+    if timeline is None:
+        return 0
+    try:
+        markers = timeline.GetMarkers() or {}
+    except Exception:
+        return 0
+    count = 0
+    for m in markers.values():
+        custom = str(m.get("customData") or "")
+        if custom.startswith(MARKER_TAG + ":") and timeline.DeleteMarkerByCustomData(custom):
+            count += 1
+    return count
