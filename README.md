@@ -3,9 +3,10 @@
 A performance profiler and fixer for DaVinci Resolve.
 
 It measures what is slow in the open project (source decode speed, render
-cost per clip), reports it with numbers, and can apply the fixes that the
-numbers justify: proxies, cache settings, markers. Every change is logged and
-can be undone.
+cost per clip, the cost of each Fusion tool), reports it with numbers, and
+can apply the fixes that the numbers justify: proxies, cache settings,
+markers, and switching off the effects that measured heavy while you edit.
+Every change is logged and can be undone.
 
 It works on the free edition of Resolve. On Windows the free edition has no
 hardware H.264/H.265 decoding, so ordinary phone and camera footage often
@@ -57,13 +58,17 @@ python -m renderflow report          # measure the open project and list what is
 python -m renderflow fix             # show what would change (nothing changes)
 python -m renderflow fix --apply     # make the changes
 python -m renderflow fix --undo      # reverse them
+
+python -m renderflow fix --tools --apply   # also find and switch off the Fusion tools that cost the most
+python -m renderflow fix --restore-tools   # switch them back on before delivery, keep the other fixes
 ```
 
 `report` runs three measurements and prints ranked findings plus a plan.
 `report --json` gives the same thing as JSON. `--no-render` skips the
 render-queue measurement, which is the slow part (roughly 15-30 s per
 timeline clip the first time; after that the samples come from a cache).
-`--remeasure` ignores the caches.
+`--tools` adds the per-tool Fusion measurement, which is slower still (one
+render per tool on each heavy clip). `--remeasure` ignores the caches.
 
 Each measurement can also be run on its own:
 
@@ -74,7 +79,8 @@ python -m renderflow render-cost     # render a sample of each timeline clip
 python -m renderflow tools           # which Fusion tool costs what, on the clips that render heavy
 ```
 
-`report --tools` folds the last one into the full report.
+`report --tools` and `fix --tools` fold the last one into the full report
+and the plan.
 
 ## What it measures
 
@@ -132,7 +138,8 @@ touched, only on tools that were on, each is put back right after its
 sample and read back to confirm, and the tools currently bypassed are listed
 in `~/.renderflow/bypassed.json` so a run killed halfway is repaired by the
 next run or by `fix --undo`. A tool the comp cannot render without (a Text+
-template, the OpticalFlow feeding a TimeStretcher) is reported as such.
+template, the OpticalFlow feeding a TimeStretcher) is reported as such. This
+is the measurement behind the tool-bypass fix below.
 
 ## What it fixes
 
@@ -150,9 +157,13 @@ Only what the measurements support:
   which).
 - With `fix --tools`, the Fusion tools measured as the cost of a clip that
   renders below real time are bypassed while you edit - the node's own
-  pass-through switch, on every clip that carries the same comp. Nothing is
-  deleted or changed, but the effect is off in the viewer and in any render
-  until it is put back, so every report carries a red finding until then.
+  pass-through switch, on every clip that carries the same comp. It takes
+  the costliest first and stops as soon as the comp fits the frame budget,
+  so a grain generator goes but the colour correction next to it stays; when
+  the budget cannot be reached (a tool the comp cannot render without) the
+  plan says how much is left. Nothing is deleted or changed, but the effect
+  is off in the viewer and in any render until it is put back, so every
+  report carries a red `fusion-tools-bypassed` finding until then.
   `fix --restore-tools` puts them back and keeps every other fix; a tool you
   had bypassed yourself is not touched either way.
 
@@ -178,6 +189,16 @@ overrode that and no proxy was proposed. A copy of the same clip with five
 chained Fusion blurs rendered at 25 ms per frame (0.67x real time, 66% of
 export time). For that one the tool proposed Smart cache and a marker, applied
 them, and undid them cleanly.
+
+On Studio 21, a 30 fps gameplay edit stuttered on every clip that had an
+adjustment layer with grain over it. The render measurement put those layers
+at 150-250 ms per frame (0.2x real time); the per-tool measurement put the
+cost on the grain, a noise generator and its mask, and left the colour
+correction and curves in the clear. `fix --tools --apply` switched those
+three tools off on all eight clips that shared the comp, the layers came in
+under the 33 ms frame budget, and `fix --restore-tools` put all 33 switches
+back exactly as they were - checked against a snapshot of every tool in the
+timeline.
 
 ## Using it from code
 
@@ -219,8 +240,9 @@ On a fast-cut timeline the render numbers come from stretches, so they say
 which ten seconds are heavy, not which cut; the scan's per-clip effect
 findings narrow it down from there.
 
-Studio's direct connection is implemented but has only been tested against
-the free edition.
+The bridge was developed against the free edition (Resolve 19) and the
+direct connection against Studio 21; the measurements and fixes are the same
+on both.
 
 ## Authors
 
