@@ -255,7 +255,7 @@ class RenderQueue:
         self.resolve = resolve
         self.project = resolve.GetProjectManager().GetCurrentProject()
         self.timeline = self.project.GetCurrentTimeline()
-        self.target_dir = target_dir or tempfile.mkdtemp(prefix="renderflow_")
+        self.target_dir = target_dir                    # made on enter when None
         self._own_dir = target_dir is None
         self.poll_s = poll_s
         self.timeout_s = timeout_s
@@ -270,6 +270,8 @@ class RenderQueue:
             "page": self.resolve.GetCurrentPage(),
             "timecode": self.timeline.GetCurrentTimecode(),
         }
+        if self._own_dir:
+            self.target_dir = tempfile.mkdtemp(prefix="renderflow_")
         os.makedirs(self.target_dir, exist_ok=True)
         if not self.project.SetCurrentRenderFormatAndCodec(self.format, self.codec):
             raise RuntimeError(f"Resolve refused render format {self.format}/{self.codec}")
@@ -290,7 +292,7 @@ class RenderQueue:
             self.resolve.OpenPage(saved["page"])
         if saved.get("timecode"):
             self.timeline.SetCurrentTimecode(saved["timecode"])
-        if self._own_dir:
+        if self._own_dir and self.target_dir:
             shutil.rmtree(self.target_dir, ignore_errors=True)
 
     def render_range(self, mark_in: int, mark_out: int, name: str = SAMPLE_NAME) -> tuple[float, str]:
@@ -416,7 +418,9 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     the two cancels the fixed per-job cost. Clips shorter than
     ``MIN_LONG_FRAMES`` are not rendered: a single sample of one would be
     mostly set-up time and read as a heavy clip. Samples already in ``cache``
-    (default: the on-disk one) are reused instead of rendered.
+    (default: the on-disk one) are reused instead of rendered. The queue is
+    only entered - render format set, Deliver page shown - if something
+    actually has to be rendered.
     """
     project = resolve.GetProjectManager().GetCurrentProject()
     if project is None:
@@ -436,7 +440,8 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     short_clips = sum(1 for i in items if i["end"] - i["start"] < MIN_LONG_FRAMES)
     if short_clips and progress:
         progress(f"skipping {short_clips} clip(s) under {MIN_LONG_FRAMES} frames - too short to measure")
-    with queue:
+    entered = False
+    try:
         for index, item in enumerate(items, 1):
             length = item["end"] - item["start"]
             if length < MIN_LONG_FRAMES:
@@ -453,6 +458,9 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                     progress(f"sample {index}/{len(items)}: {item['name']} - cached")
                 samples.append(cached)
                 continue
+            if not entered:
+                queue.__enter__()
+                entered = True
             n, n_short = sample_sizes(length, fps, seconds, short_seconds)
             short_ms, ms, status = 0.0, 0.0, "Failed"
             try:
@@ -487,6 +495,9 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
             )
             cache.put(key, sample)
             samples.append(sample)
+    finally:
+        if entered:
+            queue.__exit__(None, None, None)
 
     profile = RenderProfile(str(timeline.GetName()), fps, queue.format, queue.codec, samples)
     estimate_export(profile)

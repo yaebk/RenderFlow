@@ -254,9 +254,20 @@ def test_render_queue_refuses_while_rendering(tmp_path):
 def test_render_queue_cleans_own_temp_dir():
     resolve, _ = make([[FakeItem("a", 0, 100, 1.0)]])
     queue = RenderQueue(resolve)
+    assert queue.target_dir is None                              # nothing on disk until entered
     with queue:
         assert os.path.isdir(queue.target_dir)
     assert not os.path.exists(queue.target_dir)
+
+
+def test_render_cost_leaves_resolve_alone_when_every_clip_is_too_short(tmp_path):
+    resolve, project = make([[FakeItem("blip", 0, 5, 2.0), FakeItem("blop", 5, 50, 2.0)]])
+    project.format = {"format": "mov", "codec": "H264"}
+    rc = render_cost(resolve, queue=RenderQueue(resolve, target_dir=str(tmp_path / "q")))
+    assert all(s.too_short for s in rc.samples)
+    assert project.log == [] and project.settings == {} and project.deleted == []
+    assert project.format == {"format": "mov", "codec": "H264"}
+    assert not (tmp_path / "q").exists()
 
 
 # ---------------------------------------------------------- render_cost
@@ -366,6 +377,8 @@ def test_render_cost_reuses_cached_samples_and_keys_on_what_matters(tmp_path):
     log = []
     rc2 = render_cost(resolve, progress=log.append, queue=RenderQueue(resolve, target_dir=str(tmp_path / "b")))
     assert project.deleted == [] and rc2.samples[0].from_cache
+    assert project.log == [] and project.settings == {}          # queue never entered: nothing touched
+    assert not (tmp_path / "b").exists()
     assert round(rc2.samples[0].ms_per_frame) == 10 and rc2.samples[1].too_short
     assert "1 sample(s) reused from an earlier run" in rc2.text()
     assert any(l.endswith("plain - cached") for l in log)
