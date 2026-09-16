@@ -369,6 +369,23 @@ def test_undo_keeps_entries_it_could_not_reverse(tmp_path):
     assert [e["kind"] for e in Journal(tmp_path / "j.json").entries] == ["clip-setting"]
 
 
+def test_undo_leaves_a_setting_the_editor_changed_since(tmp_path):
+    item = FakeItem(r"D:\f\cam.mp4")
+    project = FakeProject([item])
+    actions = [Action("setting", "project", "x", "y", {"key": "perfRenderCacheMode", "value": "smart"}),
+               Action("clip-setting", "cam.mp4", "x", "y",
+                      {"path": item.path, "key": "Super Scale", "value": 1})]
+    assert apply(FakeResolve(project), actions, Journal(tmp_path / "j.json")) == []
+    project.settings["perfRenderCacheMode"] = "user"           # the editor's own choice afterwards
+    log = []
+    assert undo(FakeResolve(project), Journal(tmp_path / "j.json"), progress=log.append) == []
+    assert project.settings["perfRenderCacheMode"] == "user"
+    assert item.props["Super Scale"] == 2                       # untouched since: restored
+    assert log == ["  cam.mp4: Super Scale restored to 2",
+                   "  perfRenderCacheMode left at user - changed by hand since"]
+    assert Journal(tmp_path / "j.json").entries == []
+
+
 def test_undo_leaves_another_projects_changes_for_that_project(tmp_path):
     journal = Journal(tmp_path / "j.json")
     journal.add({"kind": "setting", "subject": "project", "key": "superScale", "old": 3,

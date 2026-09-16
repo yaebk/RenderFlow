@@ -321,7 +321,8 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 old = project.GetSetting(p["key"])
                 if not project.SetSetting(p["key"], p["value"]):
                     raise RuntimeError(f"SetSetting({p['key']}) refused")
-                record({"kind": "setting", "subject": "project", "key": p["key"], "old": old})
+                record({"kind": "setting", "subject": "project", "key": p["key"], "old": old,
+                        "new": p["value"]})
                 say(f"  {p['key']}: {old} -> {p['value']}")
 
             elif action.kind == "clip-setting":
@@ -332,7 +333,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                 if not item.SetClipProperty(p["key"], p["value"]):
                     raise RuntimeError(f"SetClipProperty({p['key']}) refused")
                 record({"kind": "clip-setting", "subject": action.subject, "path": p["path"],
-                        "key": p["key"], "old": old})
+                        "key": p["key"], "old": old, "new": p["value"]})
                 say(f"  {action.subject}: {p['key']} {old} -> {p['value']}")
 
             elif action.kind == "marker":
@@ -359,7 +360,8 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
     """Reverse every journaled change, newest first. Returns problems (empty = clean).
 
     Only changes made to the project that is open now are reversed; the rest
-    stay in the journal until that project is opened again. Afterwards any
+    stay in the journal until that project is opened again. A setting that
+    was changed again by hand since we set it is left as it is. Afterwards any
     RenderFlow marker still on the current timeline is removed too: every one
     carries our tag, so they are ours even if the journal that recorded them
     is gone.
@@ -391,14 +393,22 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
                     pass
                 say(f"  unlinked and removed proxy for {entry['subject']}")
             elif kind == "setting":
-                project.SetSetting(entry["key"], entry["old"])
-                say(f"  {entry['key']} restored to {entry['old']}")
+                current = project.GetSetting(entry["key"])
+                if _changed_since(entry, current):
+                    say(f"  {entry['key']} left at {current} - changed by hand since")
+                else:
+                    project.SetSetting(entry["key"], entry["old"])
+                    say(f"  {entry['key']} restored to {entry['old']}")
             elif kind == "clip-setting":
                 item = _media_item_by_path(project, entry["path"])
                 if item is None:
                     raise RuntimeError("clip no longer in the media pool")
-                item.SetClipProperty(entry["key"], entry["old"])
-                say(f"  {entry['subject']}: {entry['key']} restored to {entry['old']}")
+                current = item.GetClipProperty(entry["key"])
+                if _changed_since(entry, current):
+                    say(f"  {entry['subject']}: {entry['key']} left at {current} - changed by hand since")
+                else:
+                    item.SetClipProperty(entry["key"], entry["old"])
+                    say(f"  {entry['subject']}: {entry['key']} restored to {entry['old']}")
             elif kind == "marker":
                 timeline = _timeline_named(project, entry["timeline"])
                 if timeline is None:
@@ -421,6 +431,12 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
     if swept:
         say(f"  removed {swept} leftover RenderFlow marker(s) the journal did not know about")
     return problems
+
+
+def _changed_since(entry: dict[str, Any], current: Any) -> bool:
+    """True if the value is no longer the one we set (the user changed it since).
+    Entries from before ``new`` was journaled are restored unconditionally."""
+    return "new" in entry and str(current) != str(entry["new"])
 
 
 def _project_name(project) -> str:
