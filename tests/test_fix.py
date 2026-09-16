@@ -313,6 +313,15 @@ def test_apply_then_undo_round_trip(tmp_path):
     assert len(Journal(tmp_path / "journal.json")) == 0
 
 
+def test_apply_never_matches_a_clip_by_empty_path(tmp_path):
+    pathless = FakeItem("")                                     # generated media: no file
+    project = FakeProject([pathless])
+    action = Action("clip-setting", "Text+", "x", "y", {"path": "", "key": "Super Scale", "value": 1})
+    problems = apply(FakeResolve(project), [action], Journal(tmp_path / "j.json"))
+    assert problems == ["clip-setting Text+: clip no longer in the media pool"]
+    assert pathless.props["Super Scale"] == 2
+
+
 def test_apply_records_problems_and_keeps_going(tmp_path):
     project = FakeProject([])                                   # clip missing from the pool
     resolve = FakeResolve(project)

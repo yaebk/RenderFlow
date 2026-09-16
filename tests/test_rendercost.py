@@ -244,6 +244,17 @@ def test_render_queue_samples_and_restores_everything(tmp_path):
     assert list(tmp_path.iterdir()) == []                          # output removed
 
 
+def test_render_queue_refused_format_leaves_nothing_behind():
+    resolve, project = make([[FakeItem("a", 0, 100, 1.0)]])
+    project.SetCurrentRenderFormatAndCodec = lambda fmt, codec: False
+    queue = RenderQueue(resolve)
+    with pytest.raises(RuntimeError, match="refused render format"):
+        queue.__enter__()
+    assert queue.target_dir is None or not os.path.exists(queue.target_dir)
+    queue.restore()                                              # a no-op: nothing was saved
+    assert resolve.GetCurrentPage() == "edit"
+
+
 def test_render_queue_refuses_while_rendering(tmp_path):
     resolve, project = make([[FakeItem("a", 0, 100, 1.0)]])
     project.rendering = True

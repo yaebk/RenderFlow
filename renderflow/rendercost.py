@@ -69,7 +69,7 @@ DEFAULT_SECONDS = 10.0          # long sample, in timeline seconds
 DEFAULT_SHORT_SECONDS = 2.0     # short sample; slope between the two cancels job set-up
 DEFAULT_BUDGET_S = 60.0         # cap on wall time per long sample
 MIN_LONG_FRAMES = 120           # below this the pipeline's parallelism hides the slope
-TOO_SHORT = "Too short"         # status of a clip under MIN_LONG_FRAMES: not measured at all
+TOO_SHORT = "Too short"         # status of a clip under MIN_LONG_FRAMES: not measured on its own
 SAMPLE_NAME = "renderflow_sample"
 RENDER_CACHE_PATH = Path.home() / ".renderflow" / "render.json"
 RENDER_CACHE_VERSION = 1
@@ -151,7 +151,7 @@ class RenderProfile:
     codec: str
     samples: list[RenderSample]
     estimated_export_s: float = 0.0
-    shares: dict[str, float] = field(default_factory=dict)   # item -> share of export time
+    shares: dict[str, float] = field(default_factory=dict)   # sample label -> share of export time
     total_frames: int = 0
 
     def ratio(self, sample: RenderSample) -> float:
@@ -312,11 +312,12 @@ class RenderQueue:
             "page": self.resolve.GetCurrentPage(),
             "timecode": self.timeline.GetCurrentTimecode(),
         }
+        if not self.project.SetCurrentRenderFormatAndCodec(self.format, self.codec):
+            self._saved = {}
+            raise RuntimeError(f"Resolve refused render format {self.format}/{self.codec}")
         if self._own_dir:
             self.target_dir = tempfile.mkdtemp(prefix="renderflow_")
         os.makedirs(self.target_dir, exist_ok=True)
-        if not self.project.SetCurrentRenderFormatAndCodec(self.format, self.codec):
-            raise RuntimeError(f"Resolve refused render format {self.format}/{self.codec}")
         return self
 
     def __exit__(self, *exc: object) -> None:

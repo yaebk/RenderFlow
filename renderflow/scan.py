@@ -108,7 +108,7 @@ class ProjectSettings:
 class Finding:
     severity: str                   # high | medium | info
     code: str
-    subject: str                    # clip name, timeline item label, or "project"
+    subject: str                    # clip name, timeline item or stretch label, or "project"
     message: str
     why: str
 
@@ -134,9 +134,6 @@ class ScanReport:
             raw["codec_family"] = clip.codec_family
             raw["seconds"] = round(clip.seconds, 2)
         return data
-
-    def by_severity(self, severity: str) -> list[Finding]:
-        return [f for f in self.findings if f.severity == severity]
 
     def inventory_text(self) -> str:
         """Header, settings and the clip table - everything except the findings."""

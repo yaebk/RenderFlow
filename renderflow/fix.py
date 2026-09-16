@@ -10,10 +10,11 @@ is made, so a crash halfway through still leaves an undo trail:
 * **settings** - project-wide Super Scale off; Render Cache to Smart when a
   clip on the timeline measured heavy and carries effects; per-clip Super
   Scale off.
-* **markers** - a timeline marker over every clip with a high or medium
-  finding, coloured by severity, note = the finding, so the report is visible
-  inside Resolve. Tagged with custom data so undo removes exactly these.
-  Frames that already have a marker are skipped: Resolve allows one per frame.
+* **markers** - a timeline marker over every clip (or measured stretch of
+  short clips) with a high or medium finding, coloured by severity, note = the
+  finding, so the report is visible inside Resolve. Tagged with custom data so
+  undo removes exactly these. Frames that already have a marker are skipped:
+  Resolve allows one per frame.
 
 What is deliberately *not* here: render-in-place. Smart Render Cache is
 Resolve's own answer for effect-heavy clips on every edition, it does not
@@ -119,7 +120,7 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
         ))
     if settings:
         for clip in report.clips:
-            if clip.super_scale > 1:
+            if clip.super_scale > 1 and clip.path:          # pathless generated media cannot be found again
                 actions.append(Action(
                     "clip-setting", clip.name, "turn Super Scale off on this clip",
                     "Neural upscaling of every frame; re-enable for the final render.",
@@ -258,6 +259,8 @@ class Journal:
 
 # ------------------------------------------------------------------ apply
 def _media_item_by_path(project, path: str):
+    if not path:
+        return None
     root = project.GetMediaPool().GetRootFolder()
     for folder in _walk_folders(root):
         for item in folder.GetClipList() or []:
