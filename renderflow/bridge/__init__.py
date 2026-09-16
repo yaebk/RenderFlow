@@ -10,8 +10,9 @@ outside program.
 
 Two halves:
 
-* :mod:`renderflow.bridge.server` runs inside Resolve. Standard library only,
-  Python 3.6 syntax, because it runs on whatever Python Resolve embeds.
+* :mod:`renderflow.bridge.server` runs inside Resolve. Standard library only
+  and nothing newer than Python 3.7, because it runs on whatever Python
+  Resolve embeds.
 * :mod:`renderflow.bridge.client` runs anywhere. It gives you an object that
   behaves like the real ``resolve`` object, so code written against the
   Resolve API works unchanged over the bridge.

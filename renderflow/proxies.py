@@ -73,7 +73,7 @@ def ffmpeg_command(exe: str, spec: ProxySpec, source_width: int) -> list[str]:
     return cmd
 
 
-Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
+Runner = Callable[[list], "subprocess.CompletedProcess[str]"]      # bare list: this line runs on 3.8
 
 
 def _run(cmd: list[str]) -> "subprocess.CompletedProcess[str]":

@@ -23,7 +23,7 @@ Responses::
     {"id": 2, "ok": false, "error": {"type": "AttributeError", "message": "..."}}
 
 This module runs on the Python that Resolve embeds: standard library only,
-nothing newer than Python 3.6 syntax.
+nothing newer than Python 3.7.
 """
 
 import json

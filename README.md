@@ -14,6 +14,8 @@ stutters and it is not obvious why.
 ## Setup
 
 Requires Python 3.8+ and FFmpeg (`winget install Gyan.FFmpeg` on Windows).
+The part that runs inside Resolve needs whatever Python Resolve embeds to be
+3.7 or newer.
 
 ```
 python -m pip install -e .

@@ -14,7 +14,9 @@ tests) use :meth:`start`.
 Request handling (:meth:`handle_request`) is separate from the socket code so
 it can be tested against a fake ``resolve`` with no network.
 
-Runs on the Python Resolve embeds: standard library only, Python 3.6 syntax.
+Runs on the Python Resolve embeds: standard library only, and nothing newer
+than Python 3.7 (importing it pulls in the rest of the package, which uses
+dataclasses).
 """
 
 import hmac
