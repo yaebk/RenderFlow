@@ -364,6 +364,27 @@ def test_connect_prefers_direct_when_available(monkeypatch):
     assert connect(prefer="direct") is sentinel
 
 
+class LikeBlackmagics:
+    """Blackmagic's PyRemoteObject: every attribute exists and unknown ones are None."""
+
+    def __getattr__(self, name):
+        return None if name.startswith("_") else (lambda *a: "direct")
+
+    def GetProjectManager(self):
+        return self
+
+    def GetCurrentProject(self):
+        return None
+
+
+def test_bridge_cli_recognises_a_direct_connection(monkeypatch, capsys):
+    from renderflow.bridge.__main__ import main
+    monkeypatch.setattr("renderflow.bridge.__main__.connect", lambda prefer: LikeBlackmagics())
+    assert main([]) == 0
+    out = capsys.readouterr().out
+    assert "connected directly (Studio)" in out and "project  : none open" in out
+
+
 def test_connect_direct_only_raises_on_free_edition(monkeypatch):
     monkeypatch.setattr("renderflow.bridge.client.connect_direct", lambda: None)
     with pytest.raises(BridgeUnavailable):

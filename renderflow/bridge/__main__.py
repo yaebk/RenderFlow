@@ -7,7 +7,7 @@
 import argparse
 import sys
 
-from renderflow.bridge.client import Bridge, BridgeUnavailable, RemoteError, connect
+from renderflow.bridge.client import Bridge, BridgeUnavailable, RemoteError, RemoteObject, connect
 
 
 def describe(resolve) -> int:
@@ -40,7 +40,8 @@ def main(argv=None) -> int:
             print("bridge stopped")
             return 0
         resolve = connect(prefer=args.prefer)
-        if hasattr(resolve, "_bridge"):
+        # Blackmagic's own proxy answers None for any attribute, so hasattr() would lie here.
+        if isinstance(resolve, RemoteObject):
             info = resolve._bridge.ping()
             print(f"bridge   : {resolve._bridge.host}:{resolve._bridge.port}  "
                   f"(up {info['uptime']:.0f}s, {info['requests']} requests served)")
