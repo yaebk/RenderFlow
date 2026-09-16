@@ -23,6 +23,7 @@ class FullReport:
     render: RenderProfile | None = None
     findings: list[Finding] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)        # about the plan, e.g. findings not markable
     skipped: list[str] = field(default_factory=list)      # stages not run, and why
 
     def to_dict(self) -> dict[str, Any]:
@@ -31,6 +32,7 @@ class FullReport:
             "render": self.render.to_dict() if self.render else None,
             "findings": [asdict(f) for f in self.findings],
             "actions": [{**asdict(a), "estimate_s": round(a.estimate_s, 1)} for a in self.actions],
+            "notes": self.notes,
             "skipped": self.skipped,
         }
 
@@ -44,7 +46,7 @@ class FullReport:
             parts.append("skipped: " + "; ".join(self.skipped))
         parts.append("FINDINGS\n" + findings_text(
             self.findings, "none - nothing measured or observed looks like a bottleneck."))
-        parts.append("PLAN\n" + plan_text(self.actions) +
+        parts.append("PLAN\n" + plan_text(self.actions, self.notes) +
                      ("\n\napply with:  python -m renderflow fix --apply" if self.actions else ""))
         return "\n\n".join(parts)
 
@@ -78,5 +80,6 @@ def full_report(resolve, decode: bool = True, render: bool = True, proxies: str 
     if report.render:
         findings.extend(render_findings(report.render))
     report.findings = sort_findings(findings)
-    report.actions = plan(scan_report, report.render, report.findings, proxies=proxies)
+    report.actions = plan(scan_report, report.render, report.findings, proxies=proxies,
+                          notes=report.notes)
     return report

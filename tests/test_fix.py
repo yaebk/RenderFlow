@@ -158,8 +158,15 @@ def test_plan_one_marker_per_frame_and_skips_occupied_frames():
                 Finding("high", "render-heavy", items[1]["label"], "heavy", "why"),
                 Finding("high", "render-heavy", "old.mp4", "heavy", "why"),
                 Finding("high", "render-heavy", "blue.mp4", "heavy", "why")]
-    actions = plan(rep, findings=findings, settings=False)
+    notes = []
+    actions = plan(rep, findings=findings, settings=False, notes=notes)
     assert len(actions) == 1
+    assert notes == ["1 finding(s) already marked by an earlier run.",
+                     "1 finding(s) not marked - the frame already has a marker of your own: "
+                     "blue.mp4 @V1 01:00:20:00."]
+    text = plan_text(actions, notes)
+    assert text.endswith("         " + notes[1]) and "1 change(s) planned" in text
+    assert plan_text([], notes).startswith("nothing to fix") and notes[0] in plan_text([], notes)
     a = actions[0]
     assert a.subject == "cam.mp4 @V1 01:00:00:00 (+1 more)"
     assert a.params["color"] == "Red" and a.params["frame"] == 0 and a.params["duration"] == 900

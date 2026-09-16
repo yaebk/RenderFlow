@@ -151,7 +151,7 @@ def main(argv=None) -> int:
             actions = [a for a in report.actions
                        if not (args.no_markers and a.kind == "marker")
                        and not (args.no_settings and a.kind in ("setting", "clip-setting"))]
-            print(plan_text(actions))
+            print(plan_text(actions, report.notes))
             if not actions:
                 return 0
             if not args.apply:

@@ -72,9 +72,11 @@ class Action:
 def plan(report: ScanReport, render: RenderProfile | None = None, findings: list[Finding] | None = None,
          proxies: str = "auto", settings: bool = True, markers: bool = True,
          proxy_dir: Path | str = DEFAULT_PROXY_DIR, max_width: int = DEFAULT_MAX_WIDTH,
-         platform: str | None = None) -> list[Action]:
+         platform: str | None = None, notes: list[str] | None = None) -> list[Action]:
     """Decide what to change. ``proxies`` is ``auto`` (measured < 2x), ``all`` (every
-    long-GOP clip) or ``none``. ``findings`` defaults to the report's own."""
+    long-GOP clip) or ``none``. ``findings`` defaults to the report's own. Things
+    worth telling the user that are not actions (findings that could not be
+    marked) are appended to ``notes`` when a list is given."""
     findings = report.findings if findings is None else findings
     platform = platform or report.platform
     actions: list[Action] = []
@@ -139,7 +141,7 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
 
     # -- markers ------------------------------------------------------------
     if markers and report.timeline and report.timeline.items:
-        actions.extend(marker_actions(report, findings))
+        actions.extend(marker_actions(report, findings, notes))
     return actions
 
 
@@ -147,14 +149,16 @@ def _has_proxy(clip: ClipInfo) -> bool:
     return clip.proxy not in ("", "None")
 
 
-def marker_actions(report: ScanReport, findings: list[Finding]) -> list[Action]:
+def marker_actions(report: ScanReport, findings: list[Finding],
+                   notes: list[str] | None = None) -> list[Action]:
     """One marker per timeline frame where an item with a high or medium finding starts.
 
     Findings are matched by item label first, then by clip name (decode
     findings are per source clip, not per timeline item). Resolve allows one
     marker per frame on the ruler, so items on different tracks that start
     together share a marker, and frames that already carry a marker - ours from
-    an earlier apply, or the editor's own - are left alone.
+    an earlier apply, or the editor's own - are left alone and reported in
+    ``notes``.
     """
     by_subject: dict[str, list[Finding]] = {}
     for f in findings:
@@ -169,8 +173,13 @@ def marker_actions(report: ScanReport, findings: list[Finding]) -> list[Action]:
             by_frame.setdefault(max(0, item["start"] - tl.start_frame), []).append((item, hits))
 
     out: list[Action] = []
+    ours: list[str] = []
+    theirs: list[str] = []
     for frame in sorted(by_frame):
-        if frame in tl.markers:
+        existing = tl.markers.get(frame)
+        if existing is not None:
+            label = by_frame[frame][0][0]["label"]
+            (ours if existing.startswith(MARKER_TAG) else theirs).append(label)
             continue
         marked = by_frame[frame]
         all_hits = [f for _, hits in marked for f in hits]
@@ -189,19 +198,31 @@ def marker_actions(report: ScanReport, findings: list[Finding]) -> list[Action]:
              "note": note[:500], "custom": f"{MARKER_TAG}:{tl.start_frame + frame}",
              "timeline": tl.name},
         ))
+    if notes is not None:
+        if ours:
+            notes.append(f"{len(ours)} finding(s) already marked by an earlier run.")
+        if theirs:
+            notes.append(f"{len(theirs)} finding(s) not marked - the frame already has a marker of "
+                         f"your own: {_some(theirs)}.")
     return out
 
 
-def plan_text(actions: list[Action]) -> str:
+def _some(labels: list[str], limit: int = 3) -> str:
+    return ", ".join(labels[:limit]) + (f", +{len(labels) - limit} more" if len(labels) > limit else "")
+
+
+def plan_text(actions: list[Action], notes: list[str] = ()) -> str:
     if not actions:
-        return "nothing to fix - the measurements do not justify any change."
-    total = sum(a.estimate_s for a in actions)
-    lines = [f"{len(actions)} change(s) planned" + (f", about {total / 60:.0f} min of encoding"
-                                                    if total >= 60 else "") + ":"]
-    lines.extend(str(a) for a in actions)
-    if any(a.kind == "marker" for a in actions):
-        lines.append("         markers go on the timeline ruler, red = high, yellow = medium; "
-                     "undo removes them.")
+        lines = ["nothing to fix - the measurements do not justify any change."]
+    else:
+        total = sum(a.estimate_s for a in actions)
+        lines = [f"{len(actions)} change(s) planned" + (f", about {total / 60:.0f} min of encoding"
+                                                        if total >= 60 else "") + ":"]
+        lines.extend(str(a) for a in actions)
+        if any(a.kind == "marker" for a in actions):
+            lines.append("         markers go on the timeline ruler, red = high, yellow = medium; "
+                         "undo removes them.")
+    lines.extend(f"         {n}" for n in notes)
     return "\n".join(lines)
 
 
