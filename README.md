@@ -153,3 +153,10 @@ numbers; decode and render measurements stand in for them. The render sample
 includes an encode, so playback is a little faster than the render ratio
 suggests, but the ranking between clips holds. Studio's direct connection is
 implemented but has only been tested against the free edition.
+
+## Authors
+
+- (https://github.com/HudeiCS)
+- (https://github.com/yaebk)
+
+Pair-programmed on a shared machine; commits are under a single account.
