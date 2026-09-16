@@ -135,6 +135,7 @@ def test_plan_markers_from_high_and_medium_findings_only():
         ("marker", "a.mp4 @V1 01:00:00:00", "Red"), ("marker", "c.mp4 @V1 01:00:20:00", "Yellow")]
     a = actions[0].params
     assert a["frame"] == 0 and a["duration"] == 600 and a["custom"] == "renderflow:216000"
+    assert str(actions[0]) == "[red marker] a.mp4 @V1 01:00:00:00: slow"
     assert "render-heavy" in a["note"] and "fusion-comp" in a["note"]
     assert actions[1].params["frame"] == 1200
 

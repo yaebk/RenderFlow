@@ -519,7 +519,7 @@ def test_render_cost_reuses_cached_samples_and_keys_on_what_matters(tmp_path):
     assert not (tmp_path / "b").exists()
     assert round(rc2.samples[0].ms_per_frame) == 10 and rc2.samples[1].too_short
     assert "1 sample(s) reused from an earlier run" in rc2.text()
-    assert any(l.endswith("plain - cached") for l in log)
+    assert log[-1] == "render: 1 sample(s) from cache" and not any("plain" in l for l in log)
     assert rc2.to_dict()["samples"][0]["from_cache"] is True
 
     # a Fusion tool added to the clip changes the key -> rendered again

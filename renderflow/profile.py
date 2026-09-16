@@ -245,6 +245,7 @@ def profile(report: ScanReport, sample_s: float = DEFAULT_SAMPLE_S, seeks: int =
     version = ffmpeg_version(exe, runner)
     cache = cache if cache is not None else MeasurementCache()
     results: dict[str, DecodeMeasure] = {}
+    reused = 0
 
     for clip in report.clips:
         if clip.location == "missing" or not clip.path or clip.path in results:
@@ -262,9 +263,11 @@ def profile(report: ScanReport, sample_s: float = DEFAULT_SAMPLE_S, seeks: int =
                     progress(f"  skipped: {exc}")
                 continue
             cache.put(key, measure)
-        elif progress:
-            progress(f"cached    {clip.name}")
+        else:
+            reused += 1
         results[clip.path] = measure
+    if reused and progress:
+        progress(f"decode: {reused} clip(s) from cache")
 
     apply_measurements(report, results)
     return results

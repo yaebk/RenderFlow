@@ -526,6 +526,7 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                     if stretches else ""))
     jobs = items + stretches
     entered = False
+    reused = 0
     try:
         for index, item in enumerate(jobs, 1):
             length = item["end"] - item["start"]
@@ -541,8 +542,7 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
             key = _render_key(item, timeline_fp, seconds, short_seconds)
             cached = cache.get(key)
             if cached is not None:
-                if progress:
-                    progress(f"sample {index}/{len(jobs)}: {item['name']} - cached")
+                reused += 1
                 samples.append(cached)
                 continue
             if not entered:
@@ -585,6 +585,8 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     finally:
         if entered:
             queue.__exit__(None, None, None)
+    if reused and progress:
+        progress(f"render: {reused} sample(s) from cache")
 
     profile = RenderProfile(str(timeline.GetName()), fps, queue.format, queue.codec, samples)
     estimate_export(profile)

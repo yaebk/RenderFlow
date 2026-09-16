@@ -65,7 +65,10 @@ class Action:
     def __str__(self) -> str:
         est = f"  (~{self.estimate_s / 60:.0f} min)" if self.estimate_s >= 90 else (
             f"  (~{self.estimate_s:.0f}s)" if self.estimate_s else "")
-        line = f"[{self.kind}] {self.subject}: {self.summary}{est}"
+        kind = self.kind
+        if kind == "marker" and self.params.get("color"):
+            kind = f"{self.params['color'].lower()} marker"
+        line = f"[{kind}] {self.subject}: {self.summary}{est}"
         return f"{line}\n         {self.why}" if self.why else line
 
 
@@ -198,7 +201,7 @@ def marker_actions(report: ScanReport, findings: list[Finding],
                              + f"{item['name']}: {hits[0].code}: {hits[0].message}"
                              for item, hits in marked)
         out.append(Action(
-            "marker", subject, f"{MARKER_COLORS[worst.severity]} marker: {worst.message}", "",
+            "marker", subject, worst.message, "",
             {"frame": frame, "duration": max(1, max(i["end"] for i, _ in marked) - first["start"]),
              "color": MARKER_COLORS[worst.severity], "name": f"RenderFlow: {worst.code}",
              "note": note[:500], "custom": f"{MARKER_TAG}:{tl.start_frame + frame}",
