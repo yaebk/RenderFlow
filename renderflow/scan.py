@@ -89,6 +89,8 @@ class TimelineInfo:
     start_frame: int = 0
     # one dict per timeline item: name, track, start, end, clip, label, fusion_tools, color_nodes
     items: list[dict] = field(default_factory=list)
+    # frame (relative to start_frame) -> customData of the marker there ("" for a user's marker)
+    markers: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -353,7 +355,16 @@ def read_timeline(project, clips: list[ClipInfo]) -> TimelineInfo | None:
         clip_count=count,
         start_frame=_safe_int(lambda: timeline.GetStartFrame()),
         items=items,
+        markers=_markers(timeline),
     )
+
+
+def _markers(timeline) -> dict[int, str]:
+    try:
+        raw = timeline.GetMarkers() or {}
+        return {_int(frame): str(m.get("customData") or "") for frame, m in raw.items()}
+    except Exception:
+        return {}
 
 
 def _match_clip(item, by_id, by_path):

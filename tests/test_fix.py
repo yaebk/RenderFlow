@@ -134,9 +134,38 @@ def test_plan_markers_from_high_and_medium_findings_only():
     assert [(a.kind, a.subject, a.params["color"]) for a in actions] == [
         ("marker", "a.mp4", "Red"), ("marker", "c.mp4", "Yellow")]
     a = actions[0].params
-    assert a["frame"] == 0 and a["duration"] == 600 and a["custom"] == "renderflow:1:216000"
+    assert a["frame"] == 0 and a["duration"] == 600 and a["custom"] == "renderflow:216000"
     assert "render-heavy" in a["note"] and "fusion-comp" in a["note"]
     assert actions[1].params["frame"] == 1200
+
+
+def test_plan_one_marker_per_frame_and_skips_occupied_frames():
+    # Resolve allows one marker per frame: items on other tracks that start together
+    # share a marker; frames that already carry one (ours or the editor's) are skipped.
+    items = [
+        {"name": "cam.mp4", "track": 1, "start": 216000, "end": 216600, "clip": "cam.mp4",
+         "label": item_label("cam.mp4", 1, 216000, 60.0), "fusion_tools": [], "color_nodes": 1},
+        {"name": "Adjustment Clip", "track": 3, "start": 216000, "end": 216900, "clip": "",
+         "label": item_label("Adjustment Clip", 3, 216000, 60.0), "fusion_tools": [], "color_nodes": 1},
+        {"name": "old.mp4", "track": 1, "start": 216600, "end": 217200, "clip": "old.mp4",
+         "label": item_label("old.mp4", 1, 216600, 60.0), "fusion_tools": [], "color_nodes": 1},
+        {"name": "blue.mp4", "track": 1, "start": 217200, "end": 217800, "clip": "blue.mp4",
+         "label": item_label("blue.mp4", 1, 217200, 60.0), "fusion_tools": [], "color_nodes": 1},
+    ]
+    rep = report(clip("cam.mp4"), items=items)
+    rep.timeline.markers = {600: "renderflow:216600", 1200: ""}
+    findings = [Finding("medium", "decode-marginal", "cam.mp4", "slowish", "why"),
+                Finding("high", "render-heavy", items[1]["label"], "heavy", "why"),
+                Finding("high", "render-heavy", "old.mp4", "heavy", "why"),
+                Finding("high", "render-heavy", "blue.mp4", "heavy", "why")]
+    actions = plan(rep, findings=findings, settings=False)
+    assert len(actions) == 1
+    a = actions[0]
+    assert a.subject == "cam.mp4 (+1 more)"
+    assert a.params["color"] == "Red" and a.params["frame"] == 0 and a.params["duration"] == 900
+    assert "V1 cam.mp4: decode-marginal" in a.params["note"]
+    assert "V3 Adjustment Clip: render-heavy" in a.params["note"]
+    assert a.params["custom"] == "renderflow:216000"
 
 
 # ----------------------------------------------------------------- fakes
@@ -180,7 +209,12 @@ class FakeTimeline:
     def GetName(self):
         return "Timeline 1"
 
+    def GetMarkers(self):
+        return dict(self.markers)
+
     def AddMarker(self, frame, color, name, note, duration, custom=""):
+        if frame in self.markers:                                   # one marker per frame, like Resolve
+            return False
         self.markers[frame] = {"color": color, "name": name, "note": note, "duration": duration,
                                "customData": custom}
         return True
@@ -276,6 +310,27 @@ def test_apply_records_problems_and_keeps_going(tmp_path):
     problems = apply(resolve, actions, journal)
     assert len(problems) == 1 and "gone.mp4" in problems[0]
     assert project.settings["superScale"] == "1" and len(journal) == 1
+
+
+def test_apply_names_the_marker_in_the_way(tmp_path):
+    project = FakeProject([])
+    project.timeline.AddMarker(0, "Blue", "Marker 1", "", 1)
+    action = Action("marker", "cam.mp4", "x", "y", {"frame": 0, "duration": 5, "color": "Red",
+                    "name": "RenderFlow: render-heavy", "note": "n", "custom": "renderflow:216000",
+                    "timeline": "Timeline 1"})
+    problems = apply(FakeResolve(project), [action], Journal(tmp_path / "j.json"))
+    assert problems == ["marker cam.mp4: AddMarker refused: frame 0 already has marker 'Marker 1'"]
+
+
+def test_undo_tolerates_a_marker_the_editor_already_deleted(tmp_path):
+    project = FakeProject([])
+    journal = Journal(tmp_path / "j.json")
+    journal.add({"kind": "marker", "subject": "cam.mp4", "custom": "renderflow:216000",
+                 "timeline": "Timeline 1"})
+    log = []
+    assert undo(FakeResolve(project), journal, progress=log.append) == []
+    assert log == ["  marker on cam.mp4 was already gone"]
+    assert Journal(tmp_path / "j.json").entries == []
 
 
 def test_undo_keeps_entries_it_could_not_reverse(tmp_path):

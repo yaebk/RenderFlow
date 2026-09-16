@@ -13,6 +13,7 @@ is made, so a crash halfway through still leaves an undo trail:
 * **markers** - a timeline marker over every clip with a high or medium
   finding, coloured by severity, note = the finding, so the report is visible
   inside Resolve. Tagged with custom data so undo removes exactly these.
+  Frames that already have a marker are skipped: Resolve allows one per frame.
 
 What is deliberately *not* here: render-in-place. Smart Render Cache is
 Resolve's own answer for effect-heavy clips on every edition, it does not
@@ -146,35 +147,47 @@ def _has_proxy(clip: ClipInfo) -> bool:
 
 
 def marker_actions(report: ScanReport, findings: list[Finding]) -> list[Action]:
-    """One marker per timeline item that has a high or medium finding.
+    """One marker per timeline frame where an item with a high or medium finding starts.
 
     Findings are matched by item label first, then by clip name (decode
-    findings are per source clip, not per timeline item).
+    findings are per source clip, not per timeline item). Resolve allows one
+    marker per frame on the ruler, so items on different tracks that start
+    together share a marker, and frames that already carry a marker - ours from
+    an earlier apply, or the editor's own - are left alone.
     """
-    out: list[Action] = []
     by_subject: dict[str, list[Finding]] = {}
     for f in findings:
         if f.code in MARKED_CODES and f.severity in ("high", "medium"):
             by_subject.setdefault(f.subject, []).append(f)
-    seen: set[str] = set()
-    for item in report.timeline.items:
+    tl = report.timeline
+    by_frame: dict[int, list[tuple[dict, list[Finding]]]] = {}
+    for item in tl.items:
         hits = (by_subject.get(item.get("label", "")) or by_subject.get(item["name"])
                 or by_subject.get(item["clip"]) or [])
-        if not hits:
+        if hits:
+            by_frame.setdefault(max(0, item["start"] - tl.start_frame), []).append((item, hits))
+
+    out: list[Action] = []
+    for frame in sorted(by_frame):
+        if frame in tl.markers:
             continue
-        worst = min(hits, key=lambda f: 0 if f.severity == "high" else 1)
-        custom = f"{MARKER_TAG}:{item['track']}:{item['start']}"
-        if custom in seen:
-            continue
-        seen.add(custom)
-        frame = item["start"] - report.timeline.start_frame
-        note = "; ".join(f"{f.code}: {f.message}" for f in hits[:3])
+        marked = by_frame[frame]
+        all_hits = [f for _, hits in marked for f in hits]
+        worst = min(all_hits, key=lambda f: 0 if f.severity == "high" else 1)
+        first = marked[0][0]
+        subject = first["name"] + (f" (+{len(marked) - 1} more)" if len(marked) > 1 else "")
+        if len(marked) == 1:
+            note = "; ".join(f"{f.code}: {f.message}" for f in marked[0][1][:3])
+        else:
+            note = "; ".join(f"V{item['track']} {item['name']}: {hits[0].code}: {hits[0].message}"
+                             for item, hits in marked)
         out.append(Action(
-            "marker", item["name"], f"{MARKER_COLORS[worst.severity]} marker over the clip: {worst.message}",
+            "marker", subject, f"{MARKER_COLORS[worst.severity]} marker over the clip: {worst.message}",
             "Puts the finding on the timeline ruler where you edit, not just in a terminal.",
-            {"frame": max(0, frame), "duration": max(1, item["end"] - item["start"]),
+            {"frame": frame, "duration": max(1, max(i["end"] for i, _ in marked) - first["start"]),
              "color": MARKER_COLORS[worst.severity], "name": f"RenderFlow: {worst.code}",
-             "note": note[:500], "custom": custom, "timeline": report.timeline.name},
+             "note": note[:500], "custom": f"{MARKER_TAG}:{tl.start_frame + frame}",
+             "timeline": tl.name},
         ))
     return out
 
@@ -239,6 +252,17 @@ def _timeline_named(project, name: str):
     return None
 
 
+def _marker_refusal(timeline, frame: int) -> str:
+    """Why Resolve refused AddMarker: usually another marker on that frame."""
+    try:
+        existing = (timeline.GetMarkers() or {}).get(frame)
+    except Exception:
+        existing = None
+    if existing:
+        return f"AddMarker refused: frame {frame} already has marker {existing.get('name')!r}"
+    return "AddMarker refused"
+
+
 def apply(resolve, actions: list[Action], journal: Journal | None = None,
           progress: Callable[[str], None] | None = None, ffmpeg: str | None = None,
           proxy_runner=None) -> list[str]:
@@ -288,7 +312,7 @@ def apply(resolve, actions: list[Action], journal: Journal | None = None,
                     raise RuntimeError(f"timeline {p['timeline']!r} not found")
                 if not timeline.AddMarker(p["frame"], p["color"], p["name"], p["note"],
                                           p["duration"], p["custom"]):
-                    raise RuntimeError("AddMarker refused")
+                    raise RuntimeError(_marker_refusal(timeline, p["frame"]))
                 journal.add({"kind": "marker", "subject": action.subject, "custom": p["custom"],
                              "timeline": p["timeline"]})
                 say(f"  marked {action.subject}")
@@ -333,8 +357,10 @@ def undo(resolve, journal: Journal | None = None, progress: Callable[[str], None
                 timeline = _timeline_named(project, entry["timeline"])
                 if timeline is None:
                     raise RuntimeError(f"timeline {entry['timeline']!r} not found")
-                timeline.DeleteMarkerByCustomData(entry["custom"])
-                say(f"  removed marker on {entry['subject']}")
+                if timeline.DeleteMarkerByCustomData(entry["custom"]):
+                    say(f"  removed marker on {entry['subject']}")
+                else:
+                    say(f"  marker on {entry['subject']} was already gone")
         except Exception as exc:
             problems.append(f"{entry.get('kind')} {entry.get('subject')}: {exc}")
             remaining.append(entry)
