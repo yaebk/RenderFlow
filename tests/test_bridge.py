@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -404,3 +405,29 @@ def test_client_reports_a_bridge_that_accepts_but_never_answers(discovery, monke
             Bridge.discover(discovery).connect()
     finally:
         listener.close()
+
+
+# -------------------------------------------------------------- install
+def test_install_fills_in_repo_and_writes_the_launcher(tmp_path):
+    from renderflow.bridge.install import SOURCE, install, scripts_dir
+
+    target = install(tmp_path / "Utility", repo=r"D:\work\RenderFlow")
+    assert target == tmp_path / "Utility" / "RenderFlow_Bridge.py"
+    text = target.read_text("utf-8")
+    assert 'REPO = r"D:\\work\\RenderFlow"' in text                # backslashes survive re.sub
+    assert text.count("REPO = ") == 1
+    compile(text, str(target), "exec")                          # still valid Python
+    # the default repo is the checkout the launcher lives in
+    assert install(tmp_path / "again").read_text("utf-8").count(f'REPO = r"{SOURCE.parent.parent}"') == 1
+    appdata = r"C:\U\me\AppData\Roaming"
+    assert scripts_dir("win32", {"APPDATA": appdata}) == (
+        Path(appdata) / "Blackmagic Design" / "DaVinci Resolve" / "Support"
+        / "Fusion" / "Scripts" / "Utility")
+    assert scripts_dir("darwin").name == "Utility" and scripts_dir("linux").name == "Utility"
+
+
+def test_install_needs_the_checkout(tmp_path):
+    from renderflow.bridge.install import install
+
+    with pytest.raises(FileNotFoundError):
+        install(tmp_path, source=tmp_path / "missing.py")

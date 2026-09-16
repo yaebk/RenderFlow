@@ -9,6 +9,8 @@
     python -m renderflow scan               # inventory + rule-of-thumb findings only
     python -m renderflow profile            # scan + decode speed of every clip
     python -m renderflow render-cost        # time a sample of every timeline clip in Resolve's queue
+
+    python -m renderflow install-bridge     # put the in-app launcher in Resolve's Scripts menu
 """
 
 import argparse
@@ -17,6 +19,7 @@ import sys
 from dataclasses import asdict
 
 from renderflow.bridge.client import BridgeUnavailable, RemoteError, connect
+from renderflow.bridge.install import install as install_bridge
 from renderflow.fix import Journal, apply, plan_text, undo
 from renderflow.profile import (
     DEFAULT_SAMPLE_S,
@@ -91,11 +94,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc = sub.add_parser("render-cost", help="render a sample of every timeline clip and time it")
     p_rc.add_argument("--json", action="store_true", help="machine-readable output")
     render_args(p_rc)
+
+    p_inst = sub.add_parser("install-bridge",
+                            help="copy the in-app launcher into Resolve's Scripts > Utility folder")
+    p_inst.add_argument("--dest", default=None, help="scripts folder to write to (default: Resolve's)")
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "install-bridge":
+        try:
+            target = install_bridge(args.dest)
+        except (OSError, RuntimeError) as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(f"installed {target}")
+        print("In Resolve: Workspace > Scripts > RenderFlow_Bridge. Then check with:  "
+              "python -m renderflow.bridge")
+        return 0
     render_kw = {}
     if hasattr(args, "seconds"):
         render_kw = {"seconds": args.seconds, "short_seconds": args.short_seconds,

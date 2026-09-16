@@ -23,9 +23,15 @@ The free edition does not let outside programs use Resolve's scripting API,
 so RenderFlow runs a small relay script inside Resolve and talks to it over
 localhost:
 
-1. Copy `scripts/RenderFlow_Bridge.py` to
+1. Put the launcher in Resolve's scripts menu:
+
+   ```
+   python -m renderflow install-bridge
+   ```
+
+   This copies `scripts/RenderFlow_Bridge.py` into
    `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`
-   and set `REPO` at the top of the copy to the path of this checkout.
+   (or the macOS/Linux equivalent) with the path of this checkout filled in.
 2. In Resolve, open a project and go to **Workspace > Scripts > RenderFlow_Bridge**.
    A small window opens and says it is listening. Leave it open.
 3. Check the connection from a terminal:

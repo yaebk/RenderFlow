@@ -1,11 +1,8 @@
 """RenderFlow bridge - run this from inside DaVinci Resolve.
 
-Install:
-
-1. Set REPO below to your RenderFlow checkout.
-2. Copy this file to
-   %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Fusion\\Scripts\\Utility\\
-3. In Resolve: Workspace -> Scripts -> RenderFlow_Bridge
+Install with ``python -m renderflow install-bridge``, which copies this file
+into Resolve's Utility scripts folder with REPO filled in. Then, in Resolve:
+Workspace -> Scripts -> RenderFlow_Bridge.
 
 A small window says the bridge is listening; leave it open. From a terminal,
 ``python -m renderflow.bridge`` should print your Resolve version, project and
@@ -22,13 +19,18 @@ reach it, and every request must carry the token written to
 
 import sys
 
-REPO = r"C:\Users\snake\OneDrive\Documents\GitHub\RenderFlow"
+REPO = ""           # your RenderFlow checkout; install-bridge fills this in
 PORT = 0            # 0 = any free port; clients find it via the discovery file
 
-if REPO not in sys.path:
+if REPO and REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from renderflow.bridge.server import BridgeServer
+try:
+    from renderflow.bridge.server import BridgeServer
+except ImportError:
+    raise SystemExit("RenderFlow bridge: cannot import renderflow. Install this script with "
+                     "'python -m renderflow install-bridge' from your RenderFlow checkout, "
+                     "or set REPO at the top of it.")
 
 
 def get_resolve():
