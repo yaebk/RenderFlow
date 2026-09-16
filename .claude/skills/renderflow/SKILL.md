@@ -45,9 +45,12 @@ ignores the caches), and a plan of fixes. Nothing is changed. Read:
 - `render.samples[]` - `ms_per_frame`, `realtime_ratio`, `export_share`,
   `fusion_tools`, `color_nodes`, `from_cache`; `render.estimated_export_s`
   for the whole timeline. A sample with `status: "Too short"` is a clip under
-  120 frames: not measured, because Resolve's per-job set-up time would make
-  it read as heavy. A fast-cut timeline can have nothing but these, and then
-  there are no render findings at all - say so rather than guessing.
+  120 frames, which cannot be measured alone (Resolve's per-job set-up time
+  would make it read as heavy); its `in_stretch` names the stretch that
+  measured it. A sample with `stretch: true` is a run of such clips measured
+  together, `clips` listing them: its number is the average over the run, so
+  say "these ten seconds" rather than blaming one cut. A short clip with an
+  empty `in_stretch` had no short neighbours and is not measured at all.
 - `actions[]` - what `fix --apply` would do, with `estimate_s` for encodes.
 - `notes[]` - things about the plan that are not actions, e.g. findings that
   could not get a marker because the frame already has one.

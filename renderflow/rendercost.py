@@ -13,6 +13,12 @@ colour, Fusion, scaling - plus the encode of the sample.
     ms_per_frame   = (t_long - t_short) / (frames_long - frames_short)
     realtime_ratio = frames rendered per second / timeline fps
 
+Clips under 120 frames cannot be measured on their own: at that size the
+pipeline's parallelism hides the slope. Runs of such clips - a fast-cut
+section - are measured as *stretches* instead: the frames of the timeline
+covered by short clips and by no long one, in pieces of about the long sample
+length. A stretch's number is the average over the clips it spans.
+
 WHAT THE NUMBER MEANS
 ---------------------
 It is a real export speed for the sample codec (DNxHR LB, the cheapest encode
@@ -49,7 +55,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from renderflow.scan import Finding, _fusion_tools, _int, _node_count, item_label, sort_findings
+from renderflow.scan import (
+    Finding,
+    _fusion_tools,
+    _int,
+    _node_count,
+    frames_to_timecode,
+    item_label,
+    sort_findings,
+)
 
 DEFAULT_SECONDS = 10.0          # long sample, in timeline seconds
 DEFAULT_SHORT_SECONDS = 2.0     # short sample; slope between the two cancels job set-up
@@ -80,6 +94,8 @@ class RenderSample:
     label: str = ""             # unique identity: "<name> @V<track> <timecode>"
     measured_at: float = 0.0    # time.time() of the render
     from_cache: bool = False    # reused from an earlier run
+    clips: list[str] = field(default_factory=list)   # a stretch: labels of the clips it spans
+    in_stretch: str = ""        # a too-short clip: label of the stretch that measured it
 
     def __post_init__(self) -> None:
         if not self.label:
@@ -92,6 +108,10 @@ class RenderSample:
     @property
     def too_short(self) -> bool:
         return self.status == TOO_SHORT
+
+    @property
+    def stretch(self) -> bool:
+        return bool(self.clips)
 
     @property
     def two_point(self) -> bool:
@@ -145,6 +165,7 @@ class RenderProfile:
             raw["render_fps"] = round(sample.render_fps, 2)
             raw["realtime_ratio"] = round(self.ratio(sample), 3)
             raw["export_share"] = round(self.shares.get(sample.label, 0.0), 4)
+            raw["stretch"] = sample.stretch
         return data
 
     def text(self) -> str:
@@ -156,20 +177,26 @@ class RenderProfile:
                  f"{'clip':<34} {'trk':>3} {'frames':>7} {'ms/frame':>9} {'render':>8} "
                  f"{'ratio':>6} {'export':>7}  carries"]
         for s in self.samples:
-            name = (s.item[:21] + "...") if len(s.item) > 24 else s.item
-            name = f"{name} @V{s.track} {s.label.rsplit(' ', 1)[-1]}"
+            if s.stretch:
+                name, track = s.label, "-"
+            else:
+                name = (s.item[:21] + "...") if len(s.item) > 24 else s.item
+                name, track = f"{name} @V{s.track} {s.label.rsplit(' ', 1)[-1]}", str(s.track)
             carries = []
             if s.fusion_tools:
                 carries.append("fusion " + ",".join(sorted(set(s.fusion_tools))[:3]))
             if s.color_nodes > 1:
                 carries.append(f"{s.color_nodes} nodes")
             if not s.ok:
-                status = "too short to measure" if s.too_short else s.status
-                lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {'-':>9} {'-':>8} {'-':>6} "
+                if s.in_stretch:
+                    status = "measured in a stretch (below)"
+                else:
+                    status = "too short to measure" if s.too_short else s.status
+                lines.append(f"{name:<34} {track:>3} {s.length:>7} {'-':>9} {'-':>8} {'-':>6} "
                              f"{'-':>7}  {status}")
                 continue
             share = self.shares.get(s.label, 0.0)
-            lines.append(f"{name:<34} {s.track:>3} {s.length:>7} {s.ms_per_frame:>9.1f} "
+            lines.append(f"{name:<34} {track:>3} {s.length:>7} {s.ms_per_frame:>9.1f} "
                          f"{s.render_fps:>7.1f}  {self.ratio(s):>5.2f}x {share:>6.0%}  "
                          f"{', '.join(carries)}")
         cached = [s for s in self.samples if s.from_cache]
@@ -181,8 +208,7 @@ class RenderProfile:
         short = sum(1 for s in self.samples if s.too_short)
         if short:
             lines.append("")
-            lines.append(f"{short} clip(s) under {MIN_LONG_FRAMES} frames not measured: Resolve's "
-                         "per-job set-up time hides the per-frame cost of anything that short.")
+            lines.append(self._short_note(short))
         if self.estimated_export_s:
             minutes, seconds = divmod(int(round(self.estimated_export_s)), 60)
             lines.append("")
@@ -190,6 +216,22 @@ class RenderProfile:
                          f"{minutes}m {seconds:02d}s for {self.total_frames} frames "
                          f"({self.total_frames / self.fps:.0f}s of video)")
         return "\n".join(lines)
+
+
+    def _short_note(self, short: int) -> str:
+        covered = sum(1 for s in self.samples if s.too_short and s.in_stretch)
+        stretches = sum(1 for s in self.samples if s.stretch)
+        why = (f"Resolve's per-job set-up time hides the per-frame cost of anything under "
+               f"{MIN_LONG_FRAMES} frames")
+        if not covered:
+            return f"{short} clip(s) under {MIN_LONG_FRAMES} frames not measured: {why}."
+        text = (f"{covered} clip(s) under {MIN_LONG_FRAMES} frames measured as {stretches} "
+                f"stretch(es) of consecutive clips: {why}, so a stretch's number is the average "
+                "over the clips it spans.")
+        if covered < short:
+            text += (f" {short - covered} clip(s) not measured: no neighbours to make up "
+                     f"{MIN_LONG_FRAMES} frames.")
+        return text
 
 
 def _age(when: float) -> str:
@@ -386,7 +428,42 @@ def _media_path(item) -> str:
 
 
 def _label(item: dict, fps: float) -> str:
-    return item_label(item["name"], item["track"], item["start"], fps)
+    return item.get("label") or item_label(item["name"], item["track"], item["start"], fps)
+
+
+def plan_stretches(items: list[dict], fps: float, seconds: float = DEFAULT_SECONDS,
+                   min_frames: int = MIN_LONG_FRAMES) -> list[dict]:
+    """Ranges of the timeline covered only by clips too short to measure alone,
+    cut into pieces of about ``seconds`` (never under ``min_frames``), each
+    described like a timeline item so it can be sampled and cached the same way.
+
+    A piece carries the union of its clips' Fusion tools, their deepest grade,
+    and ``clips``: the labels of everything it spans. Its ``path`` encodes
+    every clip's file and position, so any re-cut changes the cache key.
+    """
+    short = [i for i in items if i["end"] - i["start"] < min_frames]
+    long_cover = _merge([(i["start"], i["end"]) for i in items if i["end"] - i["start"] >= min_frames])
+    ranges: list[tuple[int, int]] = []
+    for a, b in _merge([(i["start"], i["end"]) for i in short]):
+        ranges.extend(_subtract((a, b), long_cover))
+    target = max(min_frames, int(round(seconds * fps)))
+    out = []
+    for a, b in _merge(ranges):
+        if b - a < min_frames:
+            continue
+        pieces = max(1, (b - a) // target)
+        edges = [a + (b - a) * k // pieces for k in range(pieces + 1)]
+        for x, y in zip(edges, edges[1:]):
+            members = [i for i in items if i["start"] < y and i["end"] > x]
+            out.append({
+                "name": f"stretch of {len(members)} clips", "track": 0, "start": x, "end": y,
+                "label": f"stretch @ {frames_to_timecode(x, fps)} ({len(members)} clips)",
+                "fusion_tools": sorted({t for m in members for t in m["fusion_tools"]}),
+                "color_nodes": max((m["color_nodes"] for m in members), default=0),
+                "path": ";".join(f"{m.get('path', '')}@{m['start']}-{m['end']}" for m in members),
+                "clips": [_label(m, fps) for m in members],
+            })
+    return out
 
 
 def sample_sizes(length: int, fps: float, seconds: float, short_seconds: float,
@@ -416,8 +493,10 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     back if the short one predicts it would take more than ``budget_s`` of
     wall time (a heavy Fusion clip at seconds per frame). The slope between
     the two cancels the fixed per-job cost. Clips shorter than
-    ``MIN_LONG_FRAMES`` are not rendered: a single sample of one would be
-    mostly set-up time and read as a heavy clip. Samples already in ``cache``
+    ``MIN_LONG_FRAMES`` are not rendered on their own: a single sample of one
+    would be mostly set-up time and read as a heavy clip. Runs of them are
+    rendered as stretches instead (:func:`plan_stretches`), listed after the
+    clips. Samples already in ``cache``
     (default: the on-disk one) are reused instead of rendered. The queue is
     only entered - render format set, Deliver page shown - if something
     actually has to be rendered.
@@ -437,25 +516,31 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
     timeline_fp += f"|{queue.format}/{queue.codec}"
 
     samples: list[RenderSample] = []
+    stretches = plan_stretches(items, fps, seconds)
     short_clips = sum(1 for i in items if i["end"] - i["start"] < MIN_LONG_FRAMES)
     if short_clips and progress:
-        progress(f"skipping {short_clips} clip(s) under {MIN_LONG_FRAMES} frames - too short to measure")
+        progress(f"{short_clips} clip(s) under {MIN_LONG_FRAMES} frames - too short to measure alone"
+                 + (f"; measuring {len(stretches)} stretch(es) of consecutive clips instead"
+                    if stretches else ""))
+    jobs = items + stretches
     entered = False
     try:
-        for index, item in enumerate(items, 1):
+        for index, item in enumerate(jobs, 1):
             length = item["end"] - item["start"]
             if length < MIN_LONG_FRAMES:
+                within = next((s["label"] for s in stretches
+                               if s["start"] <= item["start"] < s["end"]), "")
                 samples.append(RenderSample(
                     item=item["name"], track=item["track"], start=item["start"], end=item["end"],
                     sample_start=item["start"], frames=0, render_ms=0.0, status=TOO_SHORT,
                     fusion_tools=item["fusion_tools"], color_nodes=item["color_nodes"],
-                    label=_label(item, fps)))
+                    label=_label(item, fps), in_stretch=within))
                 continue
             key = _render_key(item, timeline_fp, seconds, short_seconds)
             cached = cache.get(key)
             if cached is not None:
                 if progress:
-                    progress(f"sample {index}/{len(items)}: {item['name']} - cached")
+                    progress(f"sample {index}/{len(jobs)}: {item['name']} - cached")
                 samples.append(cached)
                 continue
             if not entered:
@@ -467,7 +552,7 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                 if n_short:
                     short_start = item["start"] + max(0, (length - n_short) // 2)
                     if progress:
-                        progress(f"sample {index}/{len(items)}: {item['name']} - short ({n_short} frames)")
+                        progress(f"sample {index}/{len(jobs)}: {item['name']} - short ({n_short} frames)")
                     short_ms, short_status = queue.render_range(short_start, short_start + n_short - 1)
                     if short_status != "Complete":
                         n_short, short_ms = 0, 0.0
@@ -479,7 +564,7 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                         n = min(n, length)
                 sample_start = item["start"] + max(0, (length - n) // 2)
                 if progress:
-                    progress(f"sample {index}/{len(items)}: {item['name']} - long ({n} frames)")
+                    progress(f"sample {index}/{len(jobs)}: {item['name']} - long ({n} frames)")
                 ms, status = queue.render_range(sample_start, sample_start + n - 1)
             except RuntimeError as exc:
                 ms, status, n_short, short_ms = 0.0, f"Failed: {exc}", 0, 0.0
@@ -491,7 +576,7 @@ def render_cost(resolve, seconds: float = DEFAULT_SECONDS, short_seconds: float 
                 sample_start=sample_start, frames=n, render_ms=ms, status=status,
                 fusion_tools=item["fusion_tools"], color_nodes=item["color_nodes"],
                 short_frames=n_short, short_ms=short_ms, label=_label(item, fps),
-                measured_at=time.time(),
+                measured_at=time.time(), clips=list(item.get("clips", [])),
             )
             cache.put(key, sample)
             samples.append(sample)
@@ -509,12 +594,16 @@ def estimate_export(profile: RenderProfile) -> None:
 
     A sample rendered on V2 already includes whatever is under it on V1, so
     frames are assigned to the highest track that covers them and counted once.
+    Stretches (track 0) take what no measured clip covers; clips too short to
+    measure cover nothing.
     """
     covered: list[tuple[int, int]] = []
     total_ms = 0.0
     per_item: dict[str, float] = {}
     total_frames = 0
     for s in sorted(profile.samples, key=lambda s: -s.track):
+        if s.too_short:
+            continue
         uncovered = _subtract((s.start, s.end), covered)
         frames = sum(b - a for a, b in uncovered)
         covered = _merge(covered + uncovered)
@@ -576,6 +665,10 @@ def render_findings(profile: RenderProfile) -> list[Finding]:
             carries.append(f"a {s.color_nodes}-node grade")
         what = ("; it carries " + " and ".join(carries)) if carries else ""
         rate = f"{ratio:.2f}x real time ({s.ms_per_frame:.0f} ms/frame)"
+        if s.stretch:
+            rate += f" across {len(s.clips)} short clips"
+            what += (". A stretch's number is the average over the clips it spans; the heavy "
+                     "one is whichever carries the effects")
         if ratio < 0.5:
             out.append(Finding("high", "render-heavy", s.label,
                                f"renders at {rate}",

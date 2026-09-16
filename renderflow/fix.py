@@ -141,7 +141,9 @@ def plan(report: ScanReport, render: RenderProfile | None = None, findings: list
 
     # -- markers ------------------------------------------------------------
     if markers and report.timeline and report.timeline.items:
-        actions.extend(marker_actions(report, findings, notes))
+        stretches = [{"name": s.label, "track": 0, "start": s.start, "end": s.end, "clip": "",
+                      "label": s.label} for s in (render.samples if render else []) if s.stretch]
+        actions.extend(marker_actions(report, findings, notes, stretches))
     return actions
 
 
@@ -150,14 +152,16 @@ def _has_proxy(clip: ClipInfo) -> bool:
 
 
 def marker_actions(report: ScanReport, findings: list[Finding],
-                   notes: list[str] | None = None) -> list[Action]:
+                   notes: list[str] | None = None, stretches: list[dict] = ()) -> list[Action]:
     """One marker per timeline frame where an item with a high or medium finding starts.
 
     Findings are matched by item label first, then by clip name (decode
-    findings are per source clip, not per timeline item). Resolve allows one
-    marker per frame on the ruler, so items on different tracks that start
-    together share a marker, and frames that already carry a marker - ours from
-    an earlier apply, or the editor's own - are left alone and reported in
+    findings are per source clip, not per timeline item). ``stretches`` are
+    measured runs of short clips, shaped like items (track 0), so a stretch
+    finding gets a marker spanning the run. Resolve allows one marker per
+    frame on the ruler, so items on different tracks that start together
+    share a marker, and frames that already carry a marker - ours from an
+    earlier apply, or the editor's own - are left alone and reported in
     ``notes``.
     """
     by_subject: dict[str, list[Finding]] = {}
@@ -166,7 +170,7 @@ def marker_actions(report: ScanReport, findings: list[Finding],
             by_subject.setdefault(f.subject, []).append(f)
     tl = report.timeline
     by_frame: dict[int, list[tuple[dict, list[Finding]]]] = {}
-    for item in tl.items:
+    for item in list(tl.items) + list(stretches):
         hits = (by_subject.get(item.get("label", "")) or by_subject.get(item["name"])
                 or by_subject.get(item["clip"]) or [])
         if hits:
@@ -189,7 +193,8 @@ def marker_actions(report: ScanReport, findings: list[Finding],
         if len(marked) == 1:
             note = "; ".join(f"{f.code}: {f.message}" for f in marked[0][1][:3])
         else:
-            note = "; ".join(f"V{item['track']} {item['name']}: {hits[0].code}: {hits[0].message}"
+            note = "; ".join((f"V{item['track']} " if item["track"] else "")
+                             + f"{item['name']}: {hits[0].code}: {hits[0].message}"
                              for item, hits in marked)
         out.append(Action(
             "marker", subject, f"{MARKER_COLORS[worst.severity]} marker: {worst.message}", "",

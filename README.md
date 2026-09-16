@@ -100,9 +100,13 @@ for the whole pipeline. It reports each clip's render speed against real time,
 its share of total export time, and an estimated export time for the
 timeline.
 
-Clips under 120 frames are not measured. Below that Resolve's per-job set-up
-time swamps the per-frame cost and a single sample would read as a heavy
-clip, so the table says "too short to measure" instead.
+Clips under 120 frames cannot be measured on their own: below that Resolve's
+per-job set-up time swamps the per-frame cost and a single sample would read
+as a heavy clip. Runs of them - a fast-cut section - are measured as
+*stretches* instead: the frames covered only by short clips, in pieces of
+about ten seconds, each rendered like a clip. A stretch's number is the
+average over the clips it spans, and its finding and marker cover the whole
+run. A short clip with no short neighbours stays "too short to measure".
 
 It uses the cheapest encoder available (DNxHR LB), deletes the sample jobs and
 files, and restores the render format, page, playhead and range afterwards.
@@ -185,10 +189,9 @@ numbers; decode and render measurements stand in for them. The render sample
 includes an encode, so playback is a little faster than the render ratio
 suggests, but the ranking between clips holds.
 
-Render cost is measured per clip, so a fast-cut timeline where nothing lasts
-120 frames gets no render numbers at all; the decode measurement and the
-scan still apply. Measuring longer stretches of such a timeline is the
-obvious next step.
+On a fast-cut timeline the render numbers come from stretches, so they say
+which ten seconds are heavy, not which cut; the scan's per-clip effect
+findings narrow it down from there.
 
 Studio's direct connection is implemented but has only been tested against
 the free edition.
