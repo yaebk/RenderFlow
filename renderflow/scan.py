@@ -19,9 +19,10 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-# Codecs Resolve decodes in software on the free edition (Windows/Linux):
-# long-GOP camera and screen-capture formats. Every frame depends on the frames
-# around it, so scrubbing and reverse playback are expensive.
+# Long-GOP camera and screen-capture formats. The free edition decodes them in
+# software on Windows/Linux (Studio and macOS use the GPU), and every frame
+# depends on the frames around it, so scrubbing and reverse playback are
+# expensive on any edition.
 LONG_GOP = ("H.264", "H.265", "HEVC", "AV1", "VP9", "MPEG-4", "MPEG-2", "MPEG", "XAVC", "AVC")
 INTRA = ("ProRes", "DNx", "CineForm", "MJPEG", "Motion JPEG", "Uncompressed", "BRAW",
          "R3D", "ARRIRAW", "Photo JPEG", "PNG", "TIFF", "EXR", "DPX", "JPEG 2000", "GoPro CineForm")
@@ -127,6 +128,8 @@ class ScanReport:
     settings: ProjectSettings
     clips: list[ClipInfo]
     findings: list[Finding] = field(default_factory=list)
+    edition: str = "free"           # free | studio
+    version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -137,7 +140,8 @@ class ScanReport:
 
     def inventory_text(self) -> str:
         """Header, settings and the clip table - everything except the findings."""
-        lines = [f"project  : {self.project}"]
+        lines = [f"resolve  : {self.edition.capitalize()} {self.version}".rstrip(),
+                 f"project  : {self.project}"]
         if self.timeline:
             t = self.timeline
             lines.append(f"timeline : {t.name}  {t.width}x{t.height} @ {t.fps:g} fps, "
@@ -159,7 +163,7 @@ class ScanReport:
             if c.super_scale > 1:
                 fx.append(f"superscale {c.super_scale}x")
             name = (c.name[:31] + "...") if len(c.name) > 34 else c.name
-            lines.append(f"{name:<34} {c.codec[:18]:<18} {c.width}x{c.height:>4} {c.fps:>5g} "
+            lines.append(f"{name:<34} {c.codec[:18]:<18} {f'{c.width}x{c.height}':>9} {c.fps:>5g} "
                          f"{c.bit_depth:>3} {c.seconds:>6.0f} {c.location:<9} {c.proxy[:6]:<6} "
                          f"{', '.join(fx)}")
         return "\n".join(lines)
@@ -171,11 +175,15 @@ class ScanReport:
         return self.inventory_text() + "\n\n" + self.findings_text()
 
 
-def findings_text(findings: list[Finding], empty: str) -> str:
+def findings_text(findings: list[Finding], empty: str, listed: int = 3) -> str:
     """Findings grouped by severity, or ``empty`` when there are none.
 
-    The explanation (``why``) is the same for every finding with the same
-    code, so it is printed under the first one only.
+    Findings that say the same thing about several subjects (five clips with
+    the same codec, seven copies of one Fusion comp) are printed once with a
+    count and the first ``listed`` subjects under it. The explanation
+    (``why``) is the same for every finding with the same code, so it is
+    printed under the first one only. The findings themselves, and the JSON,
+    stay one per subject.
     """
     if not findings:
         return empty
@@ -185,9 +193,21 @@ def findings_text(findings: list[Finding], empty: str) -> str:
         group = [f for f in findings if f.severity == severity]
         if group:
             lines.append(f"--- {severity} ({len(group)}) ---")
+        same: dict[tuple[str, str], list[Finding]] = {}
         for f in group:
-            lines.append(str(f) if f.code not in explained else f.line())
-            explained.add(f.code)
+            same.setdefault((f.code, f.message), []).append(f)
+        for (code, _message), alike in same.items():
+            first = alike[0]
+            if len(alike) == 1:
+                lines.append(first.line())
+            else:
+                names = [f.subject for f in alike]
+                lines.append(f"[{first.severity}] {len(alike)} clips: {first.message}")
+                lines.append("         " + ", ".join(names[:listed])
+                             + (f", +{len(names) - listed} more" if len(names) > listed else ""))
+            if code not in explained:
+                lines.append(f"         {first.why}")
+                explained.add(code)
     return "\n".join(lines)
 
 
@@ -440,9 +460,11 @@ def read_settings(project) -> ProjectSettings:
 
 # -------------------------------------------------------------------- rules
 def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
-                settings: ProjectSettings, platform: str = sys.platform) -> list[Finding]:
+                settings: ProjectSettings, platform: str = sys.platform,
+                edition: str = "free") -> list[Finding]:
     out: list[Finding] = []
-    software_decode = platform != "darwin"      # macOS free edition hardware-decodes H.264/H.265
+    # Studio decodes H.264/H.265 on the GPU everywhere; the free edition only on macOS.
+    software_decode = edition != "studio" and platform != "darwin"
 
     for c in clips:
         if c.location == "missing" or not c.online:
@@ -461,6 +483,12 @@ def find_issues(clips: list[ClipInfo], timeline: TimelineInfo | None,
                 "Long-GOP codecs (H.264/H.265/AV1) are the usual cause of stuttering on Windows: "
                 "the free edition does not use the GPU to decode them, and every frame depends on "
                 "its neighbours so scrubbing is worst. A proxy (DNxHR/ProRes) removes this entirely."))
+        elif c.long_gop:
+            out.append(Finding(
+                "info", "codec-long-gop", c.name, f"{c.codec} is long-GOP",
+                "Decoded on the GPU here, so usually fine to play - the decode measurement "
+                "(profile) is the real answer. Scrubbing still costs more than an intra-frame "
+                "codec because every frame depends on its neighbours."))
 
         if c.location == "onedrive":
             out.append(Finding("medium", "media-onedrive", c.name,
@@ -568,6 +596,21 @@ def scan(resolve, platform: str = sys.platform, **kw) -> ScanReport:
     clips = read_clips(project, **kw)
     timeline = read_timeline(project, clips)
     settings = read_settings(project)
-    report = ScanReport(str(project.GetName()), platform, timeline, settings, clips)
-    report.findings = find_issues(clips, timeline, settings, platform)
+    edition, version = read_edition(resolve)
+    report = ScanReport(str(project.GetName()), platform, timeline, settings, clips,
+                        edition=edition, version=version)
+    report.findings = find_issues(clips, timeline, settings, platform, edition)
     return report
+
+
+def read_edition(resolve) -> tuple[str, str]:
+    """("free" | "studio", version string); unknown counts as free, the cautious guess."""
+    try:
+        name = str(resolve.GetProductName() or "")
+    except Exception:
+        name = ""
+    try:
+        version = str(resolve.GetVersionString() or "")
+    except Exception:
+        version = ""
+    return ("studio" if "studio" in name.lower() else "free"), version

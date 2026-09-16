@@ -80,7 +80,8 @@ length, where the file lives (local, OneDrive, network, removable, missing),
 and whether it has a proxy. The current timeline: which clips are used, how
 many real Fusion tools and colour nodes each has. The performance settings:
 proxy mode, render cache, Super Scale. From this it applies rules of thumb:
-long-GOP codecs decoded in software, media on synced or network drives,
+long-GOP codecs decoded in software (on the free edition; Studio decodes them
+on the GPU, so there they are only noted), media on synced or network drives,
 settings that quietly disable proxies, and so on. Each finding says why it
 matters. These are guesses from facts Resolve already knows, and the two
 measurements below override them.
