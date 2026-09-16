@@ -21,6 +21,10 @@ The part that runs inside Resolve needs whatever Python Resolve embeds to be
 python -m pip install -e .
 ```
 
+This also installs a `renderflow` command; `renderflow report` and
+`python -m renderflow report` are the same thing (the examples below use the
+second form, which works even when pip's scripts folder is not on your PATH).
+
 The free edition does not let outside programs use Resolve's scripting API,
 so RenderFlow runs a small relay script inside Resolve and talks to it over
 localhost:
